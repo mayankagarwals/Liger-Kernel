@@ -34,6 +34,16 @@ class LigerFusedLinearCrossEntropyLoss(torch.nn.Module):
         self.softcap = softcap
         self.return_z_loss = return_z_loss
 
+
+    '''
+    Example 1: 
+        lin_weight: model.lm_head.weight: [vocab_size, d_model] (PyTorch stores linear weights as [out_features, in_features])
+       
+        _input: hidden_states right after the model forward: [batch, seq_len, d_model]; after reshape(-1, d_model) it becomes [(batch * seq_len), d_model]
+
+        target: targets from target_ids.reshape(-1): length batch * seq_len.
+
+    '''
     def forward(self, lin_weight, _input, target, bias=None):
         loss, z_loss = LigerFusedLinearCrossEntropyFunction.apply(
             _input,

@@ -13,6 +13,15 @@ from liger_kernel.ops.utils import is_hip
 MAX_FUSED_SIZE = 65536 // 2
 
 
+    '''
+    Example 1: 
+       
+        _input: hidden_states right after the model forward: [batch, seq_len, d_model]; after reshape(-1, d_model) it becomes [(batch * seq_len), d_model]
+        weight: model.lm_head.weight: [vocab_size, d_model] (PyTorch stores linear weights as [out_features, in_features])
+        target: targets from target_ids.reshape(-1): length batch * seq_len.
+
+    '''
+
 def fused_linear_cross_entropy_forward(
     _input,
     weight,
@@ -21,7 +30,7 @@ def fused_linear_cross_entropy_forward(
     bias=None,
     ignore_index=-100,
     lse_square_scale=0.0,
-    label_smoothing=0.0,
+    label_smoothing=0.0, # for llms, this is almost almost 0.0 so you can assume the same.
     reduction="mean",
     softcap=None,
     return_z_loss=False,
@@ -36,26 +45,58 @@ def fused_linear_cross_entropy_forward(
     # for ex: if we were to achieve the same memory consumption as BT x H, then the chunk size should be:
     # inc_factor = (V+H-1)//H, chunk_size = (BT + inc_factor - 1)//inc_factor
     # for ex: BT = 4096*4, V = 32000, H = 4096 ==> inc_factor = 8, chunk_size = 2048
-    BT, H = _input.shape
-    V = weight.shape[0]
-    BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
 
-    inc_factor = triton.cdiv(V, H)  # (V + H - 1) // H
-    chunk_size = triton.next_power_of_2(triton.cdiv(BT, inc_factor))  # (BT + inc_factor - 1) // inc_factor
-    num_chunks = triton.cdiv(BT, chunk_size)  # (BT + chunk_size - 1) // chunk_size
+    '''
+    For GPT2 
+    V (vocab size): 50,257
+    T (context length): 1,024
+    H (hidden size / n_embd):GPT-2 117M (small): 768
 
-    grad_weight = torch.zeros_like(weight, device=device) if weight.requires_grad else None
+    Batch size depends on your parallelism setup. 
+    117M params means you want to train on ~2.3B tokens
+    for global batch of 0.52M tokens per step  (4,387 steps to reach optimality). Why is this chosen? Lot of stuff goes here, let's not get into that 
+    This is 512 global sequences sequences (0.5M/1k)
+
+    8 GPUs, 8 gradient accumulation factor 
+    8 sequence per gpu . 8x8x8 leads to 512
+
+    '''
+
+    BT, H = _input.shape #  Note how this is running on a single gpu.  So batch size is 8. [8192, 768]
+    V = weight.shape[0] # Note how pytorch stores linear weights as [out_features, in_features]. Here it is [V, d_model] [50257, 768]
+    BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V)) #  min( 65536 // 2,  65536 ) ->  65536 // 2
+
+    inc_factor = triton.cdiv(V, H)  # (V + H - 1) // H. # cdiv(50257, 768) -> 67. This is how many chunks of H will make V 
+    chunk_size = triton.next_power_of_2(triton.cdiv(BT, inc_factor))  # (BT + inc_factor - 1) // inc_factor. we know cdiv(BT, inc_factor) will allow us to have BTchunked x V at lower size than BT x H . However, we would like BT chunked to be power of 2 . Wait to find out why . Here it is 122 . Next power of 2 is 128
+    num_chunks = triton.cdiv(BT, chunk_size)  # (BT + chunk_size - 1) // chunk_size. With our found chunk size, how many chunks do we need  -> 64 chunks 
+
+    grad_weight = torch.zeros_like(weight, device=device) if weight.requires_grad else None # example 1 : weight.requires grad will be true as it is the lm_head layer. 
     grad_input = torch.zeros_like(_input, device=device)
-    grad_bias = torch.zeros_like(bias, device=device) if bias is not None else None
+    grad_bias = torch.zeros_like(bias, device=device) if bias is not None else None # example 1: bias is none
+
     # we use fp32 for loss accumulator
     loss_1d = torch.zeros(BT, dtype=torch.float32, device=device)
     z_loss_1d = torch.zeros(BT, dtype=_input.dtype, device=_input.device) if return_z_loss else None
 
     # TODO: evaluate how CUDA synchronization caused by .item() affects the speed
-    target_mask = target != ignore_index
+    target_mask = target != ignore_index # Simple mask that is also of shape BXT. It has false if it is a padding index. 
+    '''
+    Why padding? 
+    Padding let's us pack variable length sequences into fixed [batch,token] tensors. It's useful for training because if we trained for a fixed sequece length , it doesn't mimic real world behaviour of short to large sequence lengths. Can introduce some bias. not sure what 
+    though , can learn more here.
+    '''
+
     total_n_non_ignore = target_mask.sum().item()
     total_sum_non_ignore_ce_weight = total_n_non_ignore
     ce_weight_sum = 0.0
+
+    '''
+
+    Deep dive into ce_weight or cross entropy weight in ce_weight.md 
+    For LLMs, we ideally want the class imbalance also to be learnt so we don't use it 
+
+    '''
+
     if ce_weight is not None:
         assert ce_weight.shape[0] == V, f"If given, weight has to be a Tensor of size V. Got: {ce_weight.shape}"
         assert torch.is_floating_point(ce_weight), (
@@ -68,26 +109,62 @@ def fused_linear_cross_entropy_forward(
         if ce_weight.stride(-1) != 1:
             ce_weight = ce_weight.contiguous()
 
-    for chunk_id in range(num_chunks):
-        start_idx = chunk_id * chunk_size
-        end_idx = min((chunk_id + 1) * chunk_size, BT)
-        _input_chunk = _input[start_idx:end_idx]  # chunk_size x H
+        '''
 
-        # when doing matmul, use the original precision
-        logits_chunk = _input_chunk @ weight.t()  # chunk_size x V
-        if bias is not None:
+        Deep dive into .contiguous 
+
+        Imagine you start with a 1-D class-weight tensor ce_weight that is already contiguous:
+
+        ce_weight = torch.tensor([0.1, 0.4, 0.5])
+
+        Now slice every other entry: ce_weight = ce_weight[::2]. PyTorch doesn’t copy data here; it returns a view that jumps through memory with stride 2. Many kernels (including the Triton kernel we call) expect the last dimension to have stride 1—i.e., adjacent elements in memory—so they can iterate efficiently and without stride logic. Hitting such a kernel with the strided view can produce wrong results or runtime errors.
+
+        Calling ce_weight = ce_weight.contiguous() forces PyTorch to copy the view into a new, properly packed buffer (stride 1). Subsequent GPU kernels then see a dense vector, match expectations, and run safely.
+
+        Not always useful. But in those cases it is a no op if its already contiguous 
+        
+        '''
+
+    for chunk_id in range(num_chunks):
+        start_idx = chunk_id * chunk_size # first chunk: start_idx = 0
+        end_idx = min((chunk_id + 1) * chunk_size, BT) # first chunk: end_indx = 128
+        _input_chunk = _input[start_idx:end_idx]  # chunk_size x H. # 128 x 768
+
+        # when doing matmul, use the original precision (unlike how previously for loss accumulation we used fp32). So if values are in fp16, keep them in fp16
+        logits_chunk = _input_chunk @ weight.t()  # chunk_size x V.  
+        '''
+
+        Deep dive into @
+        Nothing to deep dive. its normal matmul :p. Need to transpose for the shapes we have.
+        '''
+
+        '''
+        Deep dive into keeping original precision 
+
+        On NVIDIA GPUs, PyTorch routes half/bfloat16 GEMMs to cuBLAS/cutlass/Tensor Cores that accumulate in FP32 even when inputs/outputs are fp16/bf16.
+        So although your tensors are half/bfloat16:
+
+        multiply → fp16/bf16
+
+        accumulate (the sum over H) → fp32
+
+        result is then cast back to fp16/bf16 for the output tensor.
+
+        This fp32 accumulation is the key reason it’s numerically stable enough for training.
+                '''
+        if bias is not None: # for our example it is none
             logits_chunk = logits_chunk + bias
 
-        target_chunk = target[start_idx:end_idx]  # chunk_size,
+        target_chunk = target[start_idx:end_idx]  # chunk_size, (including padded ones if any)
 
-        n_rows = logits_chunk.shape[0]
+        n_rows = logits_chunk.shape[0] # chunk_size -> 128
 
         # unreduced loss
-        loss_1d_slice = loss_1d[start_idx:end_idx]  # chunk_size,
+        loss_1d_slice = loss_1d[start_idx:end_idx]  # chunk_size, -> 128,
         z_loss_1d_slice = z_loss_1d[start_idx:end_idx] if return_z_loss else None
 
         # ensure _input and target are contiguous
-        logits_chunk = logits_chunk.contiguous()
+        logits_chunk = logits_chunk.contiguous() # defensive as it is not a view
         target_chunk = target_chunk.contiguous()
 
         # Here we calculate the gradient of logits_chunk in place so we can save memory.
@@ -143,7 +220,7 @@ def fused_linear_cross_entropy_forward(
                 alpha=1.0,
             )
 
-    if reduction == "none":
+    if reduction == "none": # example 1 : mean , ignore
         loss = loss_1d
         z_loss = z_loss_1d if return_z_loss else None
 
@@ -201,6 +278,16 @@ def fused_linear_cross_entropy_backward(grad_output, grad_input, grad_weight, gr
 
 
 class LigerFusedLinearCrossEntropyFunction(torch.autograd.Function):
+
+    '''
+    Example 1: 
+       
+        _input: hidden_states right after the model forward: [batch, seq_len, d_model]; after reshape(-1, d_model) it becomes [(batch * seq_len), d_model]
+        weight: model.lm_head.weight: [vocab_size, d_model] (PyTorch stores linear weights as [out_features, in_features])
+        target: targets from target_ids.reshape(-1): length batch * seq_len.
+
+    '''
+
     @staticmethod
     @amp_custom_fwd
     def forward(
