@@ -1,15 +1,10 @@
+from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLCausalLMOutputWithPast
+from liger_kernel.transformers.model.loss_utils import LigerForCausalLMLoss
 from typing import List
 from typing import Optional
 from typing import Tuple
 from typing import Union
-
-import torch
-
-from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLCausalLMOutputWithPast
 from transformers.utils import can_return_tuple
-
-from liger_kernel.transformers.model.loss_utils import LigerForCausalLMLoss
-
 
 @can_return_tuple
 def lce_forward(
@@ -35,43 +30,7 @@ def lce_forward(
     **kwargs,
 ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
 
-    '''
-    If you pass labels, the loss layer will do the shifting internally .
-    labels = input_ids.clone()                           # [B, T]
-    labels[padding_mask] = -100                          # pad → ignore
-    labels[is_vision_token_mask] = -100                  # VL non-text → ignore
-    labels[:, 0] = -100                                  # often ignore BOS
-
-    shift_labels = labels[:, 1:].contiguous()            # [B, T-1]
-
-    If you don't pass labels, you need to pass shift_labels which is just labels[:, 1:]
-
-    Both cannot be none.
-
-    '''
-
-    r"""
-
-
-    Comparing the two signatures, the new things in lce_forward vs the original forward are:
-    return_dict: Optional[bool] = None — explicitly present in lce_forward (it was not a named param in your original; it would have been swallowed by **kwargs there).
-
-    skip_logits: Optional[bool] = None — this is new and semantically different from the original’s logits_to_keep.
-
-    And the thing that disappeared/renamed is:
-
-    logits_to_keep: Union[int, torch.Tensor] = 0 — present in the original, absent in lce_forward (replaced by skip_logits).
-
-    Everything else is the same (or only differs in type hints, which don’t matter at runtime).
-
-    Will these be used?
-
-    return_dict: Often the HF caller may pass return_dict (e.g., generation paths or user code). If it’s not passed, you should fallback to self.config.use_return_dict. So this one can be used without extra glue.
-
-    skip_logits: The current upstream code won’t pass this, because upstream was using logits_to_keep. Without a shim, skip_logits will remain None and your new behavior won’t trigger.
-
-    
-
+    """
     labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
         Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
         config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
@@ -94,10 +53,10 @@ def lce_forward(
     ```python
     >>> from PIL import Image
     >>> import requests
-    >>> from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+    >>> from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
-    >>> model = Qwen2_5_VLForConditionalGeneration.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
-    >>> processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
+    >>> model = Qwen3VLForConditionalGeneration.from_pretrained("Qwen/Qwen3-VL")
+    >>> processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL")
 
     >>> messages = [
         {
@@ -145,8 +104,7 @@ def lce_forward(
         **kwargs,
     )
 
-    hidden_states = outputs[0] # I don't know much about VL but this is same as Text decoder. Last hidden layer with shape BXTXd_model 
-    # can finish the problem at hand and come back for extra learning of VL if required.
+    hidden_states = outputs[0] 
 
     shift_labels = kwargs.pop("shift_labels", None)
     loss = None
@@ -171,19 +129,14 @@ def lce_forward(
         logits = self.lm_head(hidden_states)
 
         loss = None
-        if labels is not None or shift_labels is not None:
-            loss = self.loss_function(
-                logits=logits,
-                labels=labels,
-                shift_labels=shift_labels,
-                vocab_size=self.config.vocab_size,
-            )
+        if labels is not None:
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size)
 
     if not return_dict:
         output = (logits,) + outputs[1:]
         return (loss,) + output if loss is not None else output
 
-    return Qwen2_5_VLCausalLMOutputWithPast(
+    return Qwen3VLCausalLMOutputWithPast(
         loss=loss,
         logits=logits,
         past_key_values=outputs.past_key_values,

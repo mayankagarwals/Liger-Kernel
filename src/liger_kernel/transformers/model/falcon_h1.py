@@ -29,6 +29,18 @@ def lce_forward(
     **kwargs,
 ) -> Union[tuple, CausalLMOutputWithPast]:
     r"""
+
+    attention_mask here is not the causal mask 
+    Shape is typically (B, T) on input and gets broadcast/expanded to (B, 1, 1, T) inside attention.
+    It's used to know which tokens are padded so those can be ignored during attnetion 
+
+    Why you can’t reliably derive the mask from input_ids: EOS==PAD ambiguity (common in LLaMA-family)
+    Many GPTs set pad_token_id = eos_token_id.
+    Real sequences can legitimately contain EOS tokens inside the sequence (e.g., between chat turns).
+    If you infer mask = (ids != pad_id), you’d incorrectly mask out valid EOS tokens that are not padding.
+
+
+
     labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
         Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
         config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored

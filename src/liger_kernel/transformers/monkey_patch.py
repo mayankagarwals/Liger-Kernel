@@ -1457,6 +1457,61 @@ def apply_liger_kernel_to_qwen3_moe(
                 _patch_rms_norm_module(decoder_layer.post_attention_layernorm)
 
 
+
+def apply_liger_kernel_to_qwen3_moe_vl(
+    rope: bool = True,
+    cross_entropy: bool = False,
+    fused_linear_cross_entropy: bool = True,
+    rms_norm: bool = True,
+    swiglu: bool = False,
+    model: PreTrainedModel = None,
+) -> None:
+
+    if swiglu or rope or cross_entropy or rms_norm:
+        raise NotImplementedError("These are still under development")
+    assert not (cross_entropy and fused_linear_cross_entropy), (
+        "cross_entropy and fused_linear_cross_entropy cannot both be True."
+    )
+
+    from transformers.models.qwen3_vl import modeling_qwen3_vl
+    from transformers.models.qwen3_vl_moe import modeling_qwen3_vl_moe
+    # from transformers.models.gpt_oss.modeling_gpt_oss import GptOssModel
+    # from liger_kernel.transformers.rms_norm import LigerRMSNormForGptOss
+
+    from liger_kernel.transformers.model.qwen3_vl import lce_forward as qwen3_vl_lce_forward
+
+    # if rope:
+    #     modeling_gpt_oss.apply_rotary_pos_emb = liger_rotary_pos_emb
+
+    # if rms_norm:
+    #     modeling_gpt_oss.GptOssRMSNorm = LigerRMSNormForGptOss
+
+    # if cross_entropy:
+    #     from transformers.loss.loss_utils import nn
+
+    #     nn.functional.cross_entropy = liger_cross_entropy
+
+    if fused_linear_cross_entropy:
+        if model is not None:
+            model.forward = MethodType(qwen3_vl_lce_forward, model)
+        else:
+            modeling_qwen3_vl.Qwen3VLForConditionalGeneration.forward = qwen3_vl_lce_forward
+            modeling_qwen3_vl_moe.Qwen3VLMoeForConditionalGeneration.forward = qwen3_vl_lce_forward
+
+    # if model is not None:
+        # The model instance already exists, so we need to additionally patch the
+        # instance variables that reference already-instantiated modules
+
+        # get the base model from the model instance
+        # base_model: GptOssModel = getattr(model, model.base_model_prefix, model)
+
+        # if rms_norm:
+        #     _patch_rms_norm_module(base_model.norm)
+        # for decoder_layer in base_model.layers:
+        #     if rms_norm:
+        #         _patch_rms_norm_module(decoder_layer.input_layernorm)
+        #         _patch_rms_norm_module(decoder_layer.post_attention_layernorm)
+
 def apply_liger_kernel_to_qwen2_vl(
     rope: bool = True,
     cross_entropy: bool = False,
@@ -1642,6 +1697,58 @@ def apply_liger_kernel_to_qwen2_5_vl(
                     _patch_rms_norm_module(decoder_layer.input_layernorm)
                     _patch_rms_norm_module(decoder_layer.post_attention_layernorm)
 
+
+def apply_liger_kernel_to_qwen3_vl(
+    rope: bool = True,
+    cross_entropy: bool = False,
+    fused_linear_cross_entropy: bool = True,
+    rms_norm: bool = True,
+    swiglu: bool = False,
+    model: PreTrainedModel = None,
+) -> None:
+
+    if swiglu or rope or cross_entropy or rms_norm:
+        raise NotImplementedError("These are still under development")
+    assert not (cross_entropy and fused_linear_cross_entropy), (
+        "cross_entropy and fused_linear_cross_entropy cannot both be True."
+    )
+
+    from transformers.models.qwen3_vl import modeling_qwen3_vl
+    # from transformers.models.gpt_oss.modeling_gpt_oss import GptOssModel
+    # from liger_kernel.transformers.rms_norm import LigerRMSNormForGptOss
+
+    from liger_kernel.transformers.model.qwen3_vl import lce_forward as qwen3_vl_lce_forward
+
+    # if rope:
+    #     modeling_gpt_oss.apply_rotary_pos_emb = liger_rotary_pos_emb
+
+    # if rms_norm:
+    #     modeling_gpt_oss.GptOssRMSNorm = LigerRMSNormForGptOss
+
+    # if cross_entropy:
+    #     from transformers.loss.loss_utils import nn
+
+    #     nn.functional.cross_entropy = liger_cross_entropy
+
+    if fused_linear_cross_entropy:
+        if model is not None:
+            model.forward = MethodType(qwen3_vl_lce_forward, model)
+        else:
+            modeling_qwen3_vl.Qwen3VLForConditionalGeneration.forward = qwen3_vl_lce_forward
+
+    # if model is not None:
+        # The model instance already exists, so we need to additionally patch the
+        # instance variables that reference already-instantiated modules
+
+        # get the base model from the model instance
+        # base_model: GptOssModel = getattr(model, model.base_model_prefix, model)
+
+        # if rms_norm:
+        #     _patch_rms_norm_module(base_model.norm)
+        # for decoder_layer in base_model.layers:
+        #     if rms_norm:
+        #         _patch_rms_norm_module(decoder_layer.input_layernorm)
+        #         _patch_rms_norm_module(decoder_layer.post_attention_layernorm)
 
 def apply_liger_kernel_to_phi3(
     rope: bool = True,
@@ -1852,6 +1959,9 @@ def apply_liger_kernel_to_glm4v(
     model: PreTrainedModel = None,
 ) -> None:
     """
+
+    When is model not None? When there is already an instance of the model and we wnat to overwrite instance level methods of that. I will need to test both ways.
+
     Apply Liger kernels to replace original implementation in HuggingFace GLM-4v models.
 
     Args:
@@ -2158,7 +2268,7 @@ def apply_liger_kernel_to_falcon_h1(
 
     if fused_linear_cross_entropy:
         if model is not None:
-            model.forward = MethodType(falcon_h1_lce_forward, model)
+            model.forward = MethodType(gpt_oss_lce_forward, model)
         else:
             modeling_falcon_h1.FalconH1ForCausalLM.forward = falcon_h1_lce_forward
 
@@ -2207,6 +2317,8 @@ MODEL_TYPE_TO_APPLY_LIGER_FN = {
     "qwen2_vl_text": apply_liger_kernel_to_qwen2_vl,
     "qwen2_5_vl": apply_liger_kernel_to_qwen2_5_vl,
     "qwen2_5_vl_text": apply_liger_kernel_to_qwen2_5_vl,
+    "qwen3_vl": apply_liger_kernel_to_qwen3_vl,
+    "qwen3_vl_moe": apply_liger_kernel_to_qwen3_vl_moe,
     "smollm3": apply_liger_kernel_to_smollm3,
     "phi3": apply_liger_kernel_to_phi3,
     "paligemma": apply_liger_kernel_to_paligemma,
