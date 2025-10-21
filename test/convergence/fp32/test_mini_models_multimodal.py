@@ -863,7 +863,26 @@ def create_multimodal_dataset(model_name: str):
                 "content": [{"type": "text", "text": example["text"]}],
             },
         ]
-        example["text"] = processor.tokenizer.apply_chat_template(conversation, tokenize=False) 
+        example["text"] = processor.tokenizer.apply_chat_template(conversation, tokenize=False)  
+        '''
+        
+        Since tokenize is false. It returns as string
+        <|im_start|>user
+<|vision_start|><|image_pad|><|vision_end|>
+Describe this image briefly.
+<|im_end|>
+<|im_start|>assistant
+That’s just a plain Python string. Notice the image placeholder lives between <|vision_start|> and <|vision_end|>, with an <|image_pad|> token standing in for “an image goes here”.
+If you later call the processor on this text and supply the image tensor, it will bind the image to that placeholder:
+
+inputs = processor(
+    text=rendered,           # contains the placeholder
+    images=your_pil_or_tensor_image,  # the actual image
+    return_tensors="pt"
+)
+If multiple images as placeholders, that many should be supplied to processor. In our case, there is only one image.
+If you prefer to skip manual placeholder handling, use processor.apply_chat_template(..., tokenize=True, return_tensors="pt") and include the actual images inside the messages; it will do both steps in one go.
+        '''
         return example
 
     def preprocess_function(examples):
@@ -890,6 +909,60 @@ def create_multimodal_dataset(model_name: str):
                 return_tensors="pt",
             )
 
+            
+    '''
+    ouput has the following shape
+    >>> example = next(iter(create_multimodal_dataset("mini_gemma3")))
+    >>> {k: (tuple(v.shape), v.dtype) for k, v in example.items()}
+    {'input_ids': ((1, 1024), torch.int64),
+    'attention_mask': ((1, 1024), torch.int64),
+    'token_type_ids': ((1, 1024), torch.int64),
+    'pixel_values': ((1, 3, 224, 224), torch.float32)}
+
+    >>> example["input_ids"][0][-16:]
+    tensor([  96,    8, 1060,    8,    7, 5908,  412,  770,   17,    8,  193,    8,
+            96,    8, 1060,    8])
+
+    >>> example["pixel_values"].min().item(), example["pixel_values"].max().item()
+    (-1.0, 1.0)
+
+    Note how image_pad is a special token that stores the knowledge of where the corresponding image would go from the image array
+    '''
+
+    '''
+    For the Qwen3-VL branch in test/convergence/fp32/test_mini_models_multimodal.py:915, each row coming out of train_dataset is a dict with four tensor entries: input_ids, attention_mask, pixel_values, and image_grid_thw (the raw text/image columns were dropped in the last map call).
+Shapes/dtypes you’ll see on the first example:
+input_ids: torch.Size([1, 1024]), torch.int64. Because padding side is left, the first ~990 positions are pad id (fast_tokenizer.pad_token_id), then you hit the multimodal span.
+attention_mask: torch.Size([1, 1024]), torch.int64, with zeros for the left pad and ones starting at the first real token (e.g. indices 993: in my run).
+pixel_values: torch.Size([16, 1176]), torch.float32. Qwen3 inherits the Qwen2-VL image processor, so the 64×64 procedural image is resized to 56×56, split into a 4×4 spatial grid, merged in 2×2 blocks, and flattened—hence 16 patch vectors, each of length 1 176.
+image_grid_thw: torch.Size([1, 3]), torch.int64, with value tensor([[1, 4, 4]]), telling you there’s 1 “time step” and a 4×4 patch lattice. The processor uses this to 
+
+Token sample (ids around the image span):
+example["input_ids"][0][740:752] => tensor([18153, …, 18153]), i.e. 16 repeats of the <|image_pad|> id matching the 4×4 patch grid. Decoding around the same window gives the standard chat prompt:
+<|im_start|>system
+You are a helpful assistant.<|im_end|>
+<|im_start|>user
+<|vision_start|><|image_pad|>×16<|vision_end|>
+Describe this image.<|im_end|>
+<|im_start|>assistant
+First Citizen:<|im_end|>
+pixel_values are already normalized to roughly [-1.79, 1.75]; the single bright scan line you inject appears as the max-valued row. The rest of the values are close to the CLIP mean offset.
+
+ How did we get at this pixel count? 
+ Start from our procedural tensor (3×64×64). Before patching, the helper smart_resize forces height/width to be divisible by patch_size * merge_size. With patch_size=14 and merge_size=2, the factor is 28. round(64/28)=2, so the image becomes 56×56. This still satisfies the min/max pixel constraints, so no further scaling happens.
+Next, the processor rescale/normalizes the float values, flips to channels‑first, and flattens out the patch grid. Because grid_h = resized_height / patch_size = 56 / 14 = 4 and grid_w = 4, a still image yields a 4×4 lattice. temporal_patch_size is 2, so the single frame is duplicated once to make the time axis divisible by 2; the computed grid_t becomes 1.
+When the tensor is reshaped, each spatial cell packs an entire 2×14×14 chunk for all three channels. The feature dimension is therefore 3 (channels) × 2 (temporal_patch_size) × 14 × 14 = 1176. The total number of tokens is grid_t × grid_h × grid_w = 1 × 4 × 4 = 16.
+That’s why you see pixel_values with shape (16, 1176) (and dtype torch.float32) when iterating train_dataset for mini_qwen3_vl. Each row is a flattened patch embedding, and the accompanying image_grid_thw = tensor([[1, 4, 4]]) records the (t, h, w) grid so the processor can reconstruct placeholder counts when it reencodes the text.
+    
+    But the 1176 has a copy of image. doesnt that cause issues
+
+
+That duplication isn’t a bug; it’s how the Qwen2/Qwen3 vision stack expects its inputs. The image processor always pads the “temporal” axis up to temporal_patch_size (set to 2) before it flattens the patches, even for a still frame. So each lattice cell contributes 3 × 2 × 14 × 14 = 1176 numbers: two identical 14×14 patches stacked in time.
+
+Downstream, both the placeholder expansion (num_image_tokens = image_grid_thw.prod() // merge_size**2) and the vision encoder itself are written with that 2× patch layout in mind. Every multimodal model variant that shares this processor (Qwen2-VL, Qwen2.5-VL, Qwen3-VL) is trained with the same convention, so the duplicate frame doesn’t break anything—each <|image_pad|> slot just carries the flattened tensor the model already knows how to interpret.
+    
+    '''
+
     train_dataset = (
         load_dataset("text", data_files={"train": UNTOKENIZED_DATASET_PATH}, split="train")
         '''
@@ -903,7 +976,7 @@ def create_multimodal_dataset(model_name: str):
         .to_iterable_dataset()  # only map examples as-needed and on-demand
         .map(generate_procedural_image, with_indices=True) # with_indices=True tells Hugging Face Datasets to call the mapping function as generate_procedural_image(example, index) instead of just generate_procedural_image(example)
         .map(apply_chat_template)
-        .map(preprocess_function, remove_columns=["text", "image"])
+        .map(preprocess_function, remove_columns=["text", "image"]) # drop raw text and image columns
     )
     return train_dataset
 
