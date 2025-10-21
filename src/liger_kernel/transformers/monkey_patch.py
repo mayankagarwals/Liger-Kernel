@@ -1706,9 +1706,10 @@ def apply_liger_kernel_to_qwen3_vl(
     swiglu: bool = False,
     model: PreTrainedModel = None,
 ) -> None:
+    """
+    Apply Liger kernels to replace original implementation in HuggingFace Qwen3 VL models.
+    """
 
-    if swiglu or rope or cross_entropy or rms_norm:
-        raise NotImplementedError("These are still under development")
     assert not (cross_entropy and fused_linear_cross_entropy), (
         "cross_entropy and fused_linear_cross_entropy cannot both be True."
     )
@@ -1719,16 +1720,17 @@ def apply_liger_kernel_to_qwen3_vl(
 
     from liger_kernel.transformers.model.qwen3_vl import lce_forward as qwen3_vl_lce_forward
 
-    # if rope:
-    #     modeling_gpt_oss.apply_rotary_pos_emb = liger_rotary_pos_emb
+    # TODO : Qwen3 vl utilizes these underlying qwen 3 ops. 
+    if rope:
+        modeling_gpt_oss.apply_rotary_pos_emb = liger_rotary_pos_emb
+    
+    if rms_norm:
+        modeling_qwen3.Qwen3RMSNorm = LigerRMSNorm
 
-    # if rms_norm:
-    #     modeling_gpt_oss.GptOssRMSNorm = LigerRMSNormForGptOss
+    if cross_entropy:
+        from transformers.loss.loss_utils import nn
 
-    # if cross_entropy:
-    #     from transformers.loss.loss_utils import nn
-
-    #     nn.functional.cross_entropy = liger_cross_entropy
+        nn.functional.cross_entropy = liger_cross_entropy
 
     if fused_linear_cross_entropy:
         if model is not None:
@@ -1736,19 +1738,25 @@ def apply_liger_kernel_to_qwen3_vl(
         else:
             modeling_qwen3_vl.Qwen3VLForConditionalGeneration.forward = qwen3_vl_lce_forward
 
+    if swiglu:
+        modeling_qwen3.Qwen3MLP = LigerSwiGLUMLP
+
     # if model is not None:
-        # The model instance already exists, so we need to additionally patch the
-        # instance variables that reference already-instantiated modules
+    #     # The model instance already exists, so we need to additionally patch the
+    #     # instance variables that reference already-instantiated modules
 
-        # get the base model from the model instance
-        # base_model: GptOssModel = getattr(model, model.base_model_prefix, model)
+    #     # get the base model from the model instance
+    #     base_model: Qwen3Model = getattr(model, model.base_model_prefix, model)
 
-        # if rms_norm:
-        #     _patch_rms_norm_module(base_model.norm)
-        # for decoder_layer in base_model.layers:
-        #     if rms_norm:
-        #         _patch_rms_norm_module(decoder_layer.input_layernorm)
-        #         _patch_rms_norm_module(decoder_layer.post_attention_layernorm)
+    #     if rms_norm:
+    #         _patch_rms_norm_module(base_model.norm)
+    #     for decoder_layer in base_model.layers:
+    #         if swiglu:
+    #             _patch_swiglu_module(decoder_layer.mlp, LigerSwiGLUMLP)
+    #         if rms_norm:
+    #             _patch_rms_norm_module(decoder_layer.input_layernorm)
+    #             _patch_rms_norm_module(decoder_layer.post_attention_layernorm)
+
 
 def apply_liger_kernel_to_phi3(
     rope: bool = True,

@@ -31,6 +31,9 @@ def lce_forward(
 ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
 
     """
+
+    one thing that makes things very clear is comparing this with actual implementation. That also does just this much
+
     labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
         Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
         config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored

@@ -114,6 +114,21 @@ except ImportError:
     QWEN2_5_VL_AVAILABLE = False
 
 try:
+    # Qwen3-VL is only available in transformers>=4.57.0
+    import transformers
+
+    from packaging import version
+    from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
+    from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import Qwen3VLMoeConfig
+    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeForConditionalGeneration
+
+    QWEN3_VL_AVAILABLE = version.parse(transformers.__version__) >= version.parse("4.57.0")
+except ImportError:
+    QWEN3_VL_AVAILABLE = False
+
+
+try:
     from transformers.models.granite import GraniteConfig
     from transformers.models.granite import GraniteForCausalLM
 
@@ -536,6 +551,8 @@ if QWEN3_AVAILABLE:
             mlp_only_layers=None,
         ),
     )
+
+if QWEN3_VL_AVAILABLE:
 
 if GEMMA3_AVAILABLE:
     MINI_MODEL_SETUPS["mini_gemma3_text"] = MiniModelConfig(
@@ -1169,7 +1186,7 @@ def run_mini_model(
     loss_list = []
 
     for i in range(num_steps):
-        batch = next(loader_iter).to(model.device)
+        batch = next(loader_iter).to(model.device) # B (16) x T (28)
         optimizer.zero_grad()
         output = model(**batch)
         output.loss.backward()
@@ -1177,6 +1194,13 @@ def run_mini_model(
         print(f"Step {i}, Loss: {output.loss.item()}")
         loss_list.append(output.loss.item())
 
+    '''
+    We flip the model into eval mode at the end so the parity check runs on deterministic inference code paths—dropout 
+    and other training-only behaviors stay off—before we grab logits (test/convergence/fp32/test_mini_models.py:1197). 
+    More importantly, the Liger patches default to skipping the logits tensor while training (they rely on fused loss instead), 
+    so the extra forward pass with skip_logits=False is what actually materializes the logits we need for get_logprobs 
+    (test/convergence/fp32/test_mini_models.py:1199-1205).
+    '''
     model.eval()
     eval_batch = next(loader_iter).to(model.device)
     if with_liger:
@@ -1518,6 +1542,7 @@ def test_mini_model(
     )
 
     # Compare the topk logprobs from evaluation step
+    # In this test, skip_logits can be utilized and hence logprobs might not be present
     if expected_output["topk_logprobs"] is not None and actual_output["topk_logprobs"] is not None:
         assert_verbose_allclose(
             expected_output["topk_logprobs"],

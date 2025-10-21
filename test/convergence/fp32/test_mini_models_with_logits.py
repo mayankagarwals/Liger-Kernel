@@ -72,6 +72,8 @@ from test.utils import revert_liger_kernel_to_smollm3
 from test.utils import set_seed
 from test.utils import simple_collate_fn
 
+ 
+
 try:
     from transformers.models.llama4.configuration_llama4 import Llama4TextConfig
     from transformers.models.llama4.modeling_llama4 import Llama4ForCausalLM
@@ -1151,7 +1153,7 @@ def run_mini_model(
         if "llava" in model_name:
             apply_liger_kernel_to_llama(**kwargs)
 
-        kwargs["fused_linear_cross_entropy"] = False
+        kwargs["fused_linear_cross_entropy"] = False # in this test logits are always materialized.
         kwargs["cross_entropy"] = False
 
         MINI_MODEL_SETUPS[model_name].liger_kernel_patch_func(**kwargs)
@@ -1176,6 +1178,7 @@ def run_mini_model(
         print(f"Step {i}, Loss: {output.loss.item()}")
         loss_list.append(output.loss.item())
 
+    # since logits are materialized, no need to do another eval step
     topk_logprobs = get_topk(get_logprobs(output.logits))
     MINI_MODEL_SETUPS[model_name].liger_kernel_patch_revert_func(**revert_kwargs)
     return {

@@ -636,7 +636,35 @@ def create_processor(model_name: str):
         tokenizer_config = load_tokenizer_config(
             os.path.join(FAKE_CONFIGS_PATH, "Qwen/Qwen2.5-VL-7B-Instruct/tokenizer_config.json")
         )
-        tokenizer_base = train_bpe_tokenizer(
+        tokenizer_base = train_bpe_tokenizer( 
+        '''
+        train a small tokenizer from just the added tokens 
+        {
+  "151643": "<|endoftext|>",
+  "151644": "<|im_start|>",
+  "151645": "<|im_end|>",
+  "151646": "<|object_ref_start|>",
+  "151647": "<|object_ref_end|>",
+  "151648": "<|box_start|>",
+  "151649": "<|box_end|>",
+  "151650": "<|quad_start|>",
+  "151651": "<|quad_end|>",
+  "151652": "<|vision_start|>",
+  "151653": "<|vision_end|>",
+  "151654": "<|vision_pad|>",
+  "151655": "<|image_pad|>",
+  "151656": "<|video_pad|>",
+  "151657": "<tool_call>",
+  "151658": "</tool_call>",
+  "151659": "<|fim_prefix|>",
+  "151660": "<|fim_middle|>",
+  "151661": "<|fim_suffix|>",
+  "151662": "<|fim_pad|>",
+  "151663": "<|repo_name|>",
+  "151664": "<|file_sep|>"
+}
+Yes, the tokenizer will be absolutely useless. Mainly for testing so its okay.
+        '''
             [
                 token.content
                 for key, token in sorted(
@@ -645,6 +673,10 @@ def create_processor(model_name: str):
                 )
             ]
         )
+
+        '''
+Wraps that raw tokenizer object in the model-specific fast tokenizer class so you get all the HF tokenizer APIs and Qwen-specific settings (special tokens, model max length, etc.).
+        '''
         qwen_tokenizer = Qwen2TokenizerFast(tokenizer_object=tokenizer_base, **tokenizer_config)
         image_processor = Qwen2VLImageProcessor()
         video_processor = Qwen2VLVideoProcessor()
@@ -805,10 +837,10 @@ def create_processor(model_name: str):
 def create_multimodal_dataset(model_name: str):
     processor = create_processor(model_name)
 
-    def generate_procedural_image(example, index):
+    def generate_procedural_image(example, index): 
         """Generate an image with a single row of white pixels at the index specified"""
-        image = torch.zeros(3, TEST_IMAGE_DIM, TEST_IMAGE_DIM)
-        image[:, index % TEST_IMAGE_DIM, :] = 255
+        image = torch.zeros(3, TEST_IMAGE_DIM, TEST_IMAGE_DIM) # 3 x 64 x 64
+        image[:, index % TEST_IMAGE_DIM, :] = 255 
         example["image"] = image
         return example
 
@@ -831,7 +863,7 @@ def create_multimodal_dataset(model_name: str):
                 "content": [{"type": "text", "text": example["text"]}],
             },
         ]
-        example["text"] = processor.tokenizer.apply_chat_template(conversation, tokenize=False)
+        example["text"] = processor.tokenizer.apply_chat_template(conversation, tokenize=False) 
         return example
 
     def preprocess_function(examples):
@@ -860,8 +892,16 @@ def create_multimodal_dataset(model_name: str):
 
     train_dataset = (
         load_dataset("text", data_files={"train": UNTOKENIZED_DATASET_PATH}, split="train")
+        '''
+        When you use load_dataset("text", data_files={"train": UNTOKENIZED_DATASET_PATH}, split="train"), Hugging Face turns the plain-text file into a table-like dataset
+        Once loaded, the dataset behaves like:
+
+        train_dataset.column_names → ["text"]
+        train_dataset[0] → {"text": "First Citizen:"}
+
+        '''
         .to_iterable_dataset()  # only map examples as-needed and on-demand
-        .map(generate_procedural_image, with_indices=True)
+        .map(generate_procedural_image, with_indices=True) # with_indices=True tells Hugging Face Datasets to call the mapping function as generate_procedural_image(example, index) instead of just generate_procedural_image(example)
         .map(apply_chat_template)
         .map(preprocess_function, remove_columns=["text", "image"])
     )
@@ -921,6 +961,11 @@ def run_mini_model_multimodal(
 
     model = create_model(model_name).to(dtype).to(device)
 
+    '''
+    Only the multimodal suite flips on checkpointing (test/convergence/fp32/test_mini_models_multimodal.py:922) 
+    because those configs carry the vision stack and image/video features, so even the “mini” variants keep much larger activation 
+    tensors than their text-only counterparts
+    '''
     model.gradient_checkpointing_enable()
 
     train_dataset = create_multimodal_dataset(model_name)

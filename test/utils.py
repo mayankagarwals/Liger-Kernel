@@ -84,6 +84,11 @@ def assert_verbose_allclose(tensor1, tensor2, rtol=1e-05, atol=1e-08, max_print=
 
     Raises:
     AssertionError: If the tensors are not all close within the given tolerance.
+
+
+    Example 1 (relative dominates): if tensor2[i] = 100, rtol=1e-5, atol=1e-8, then tolerance ≈ 1e-8 + 1e-5*100 = 1e-3 + 1e-8 ≈ 0.001. So tensor1[i] = 100.0008 passes, but 100.002 fails because the deviation (0.002) exceeds 0.001.
+Example 2 (absolute dominates): if tensor2[j] = 0, the relative term is zero, so tolerance = 1e-8. tensor1[j] = 9e-9 passes, but 2e-8 fails.
+
     """
     # Check if the shapes of the tensors match
     if tensor1.shape != tensor2.shape:
@@ -149,6 +154,9 @@ class MiniModelConfig:
     mini_model_config: PretrainedConfig
 
 
+'''
+In PyTorch, the DataLoader’s collate_fn is the function that merges a list of samples (returned by your dataset’s __getitem__) into a single batch.
+'''
 def simple_collate_fn(data: List[Dict[str, Any]]):
     """A basic collate function to use for DataLoader"""
     batch = {}
@@ -160,7 +168,7 @@ def simple_collate_fn(data: List[Dict[str, Any]]):
     batch["attention_mask"] = attention_mask
     batch["labels"] = labels
     if version.parse("4.54.1") <= version.parse(transformers.__version__):
-        shift_labels = nn.functional.pad(labels, (0, 1), value=-100)
+        shift_labels = nn.functional.pad(labels, (0, 1), value=-100) # add one -100 value to labels tensor on right
         shift_labels = shift_labels[..., 1:].contiguous()
         batch["shift_labels"] = shift_labels
 
