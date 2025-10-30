@@ -6,6 +6,7 @@ from types import MethodType
 from typing import Callable
 from typing import Optional
 
+import torch
 import transformers
 
 from packaging import version
@@ -55,6 +56,19 @@ TRANSFORMER_DEPRECATION_WARNING = "Support for transformers versions < 4.46.1 wi
 def _bind_method_to_module(module, method_name: str, new_method: Callable):
     # Binds a new method to a module instance so that self is passed as the first argument
     module.__dict__[method_name] = new_method.__get__(module, module.__class__)
+
+
+def _liger_qwen3_vl_apply_rotary_pos_emb_vision(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+    """
+    Wrapper around liger_rotary_pos_emb used by Qwen3-VL vision attention.
+    Casts inputs to float32 before applying the kernel and restores original dtype afterwards.
+    """
+
+    orig_q_dtype, orig_k_dtype = q.dtype, k.dtype
+    q = q.to(torch.float32)
+    k = k.to(torch.float32)
+    q_out, k_out = liger_rotary_pos_emb(q, k, cos, sin, position_ids=position_ids, unsqueeze_dim=unsqueeze_dim)
+    return q_out.to(orig_q_dtype), k_out.to(orig_k_dtype)
 
 
 def _patch_rms_norm_module(module, offset=0.0, eps=1e-6, casting_mode="llama", in_place=True, row_mode=None):
@@ -1645,7 +1659,7 @@ def apply_liger_kernel_to_qwen2_5_vl(
 
 
 def apply_liger_kernel_to_qwen3_vl(
-    rope: bool = False,
+    rope: bool = True,
     cross_entropy: bool = False,
     fused_linear_cross_entropy: bool = True,
     rms_norm: bool = True,
@@ -1671,11 +1685,6 @@ def apply_liger_kernel_to_qwen3_vl(
         "cross_entropy and fused_linear_cross_entropy cannot both be True."
     )
 
-    if rope or cross_entropy or swiglu:
-        raise NotImplementedError(
-            "Qwen3-VL support currently provides fused linear cross entropy and RMSNorm patches only."
-        )
-
     from transformers.models.qwen3_vl import modeling_qwen3_vl
     from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
     from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
@@ -1683,8 +1692,17 @@ def apply_liger_kernel_to_qwen3_vl(
 
     from liger_kernel.transformers.model.qwen3_vl import lce_forward as qwen3_vl_lce_forward
 
+    if rope:
+        modeling_qwen3_vl.apply_rotary_pos_emb = liger_rotary_pos_emb
+        modeling_qwen3_vl.apply_rotary_pos_emb_vision = _liger_qwen3_vl_apply_rotary_pos_emb_vision
+
     if rms_norm:
         modeling_qwen3_vl.Qwen3VLTextRMSNorm = LigerRMSNorm
+
+    if cross_entropy:
+        from transformers.loss.loss_utils import nn
+
+        nn.functional.cross_entropy = liger_cross_entropy
 
     if fused_linear_cross_entropy:
         if model is not None:
@@ -1718,7 +1736,7 @@ def apply_liger_kernel_to_qwen3_vl(
 
 
 def apply_liger_kernel_to_qwen3_vl_moe(
-    rope: bool = False,
+    rope: bool = True,
     cross_entropy: bool = False,
     fused_linear_cross_entropy: bool = False,
     rms_norm: bool = True,
@@ -1742,16 +1760,25 @@ def apply_liger_kernel_to_qwen3_vl_moe(
         "cross_entropy and fused_linear_cross_entropy cannot both be True."
     )
 
-    if rope or cross_entropy or swiglu or fused_linear_cross_entropy:
-        raise NotImplementedError("Qwen3-VL-MoE support currently provides RMSNorm patches only.")
-
     from transformers.models.qwen3_vl_moe import modeling_qwen3_vl_moe
     from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeForConditionalGeneration
     from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeModel
     from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextModel
 
+    if rope:
+        modeling_qwen3_vl_moe.apply_rotary_pos_emb = liger_rotary_pos_emb
+        modeling_qwen3_vl_moe.apply_rotary_pos_emb_vision = _liger_qwen3_vl_apply_rotary_pos_emb_vision
+
     if rms_norm:
         modeling_qwen3_vl_moe.Qwen3VLMoeTextRMSNorm = LigerRMSNorm
+
+    if cross_entropy:
+        from transformers.loss.loss_utils import nn
+
+        nn.functional.cross_entropy = liger_cross_entropy
+
+    if fused_linear_cross_entropy:
+        raise NotImplementedError("Fused linear cross entropy is not supported for Qwen3-VL-MoE models.")
 
     if model is not None and rms_norm:
         if isinstance(model, (Qwen3VLMoeForConditionalGeneration, Qwen3VLMoeModel)):

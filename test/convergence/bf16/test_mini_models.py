@@ -1281,33 +1281,37 @@ def run_mini_model(
         revert_kwargs["model_type"] = "causal_lm"
 
     if with_liger is True:
-        kwargs = {
-            "rope": True,
-            "rms_norm": True,
-        }
-
-        if "glm4" in model_name:
-            kwargs["rope"] = False
-
-        model_supports_layer_norm = "qwen2_vl" in model_name
-        if model_supports_layer_norm:
-            kwargs["layer_norm"] = True
-
-        if "gemma" in model_name:
-            kwargs["geglu"] = True
+        if "qwen3_vl" in model_name:
+            kwargs = {
+                "rope": True,
+                "rms_norm": True,
+                "fused_linear_cross_entropy": False,
+                "cross_entropy": True,
+            }
         else:
-            kwargs["swiglu"] = True
+            kwargs = {
+                "rope": True,
+                "rms_norm": True,
+            }
 
-        if "llava" in model_name:
-            apply_liger_kernel_to_llama(**kwargs)
+            if "glm4" in model_name:
+                kwargs["rope"] = False
 
-        # temporary for development
-        if "qwen3_vl" in model_name: 
-            kwargs = {}
+            model_supports_layer_norm = "qwen2_vl" in model_name
+            if model_supports_layer_norm:
+                kwargs["layer_norm"] = True
 
-        # fused_linear_cross_entropy is not supported in mini_granite3
-        kwargs["fused_linear_cross_entropy"] = True if model_name != "mini_granite3" else False
-        kwargs["cross_entropy"] = False
+            if "gemma" in model_name:
+                kwargs["geglu"] = True
+            else:
+                kwargs["swiglu"] = True
+
+            if "llava" in model_name:
+                apply_liger_kernel_to_llama(**kwargs)
+
+            # fused_linear_cross_entropy is not supported in mini_granite3
+            kwargs["fused_linear_cross_entropy"] = True if model_name != "mini_granite3" else False
+            kwargs["cross_entropy"] = False
 
         MINI_MODEL_SETUPS[model_name].liger_kernel_patch_func(**kwargs)
     else:
