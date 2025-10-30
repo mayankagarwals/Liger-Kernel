@@ -8,7 +8,10 @@ import torch
 from transformers.utils import can_return_tuple
 
 from liger_kernel.transformers.model.loss_utils import LigerForCausalLMLoss
-from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeCausalLMOutputWithPast
+from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
+    Qwen3VLMoeCausalLMOutputWithPast,
+    load_balancing_loss_func,
+)
 
 
 @can_return_tuple
@@ -90,6 +93,19 @@ def lce_forward(
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.text_config.vocab_size)
 
+    # Compute auxiliary load-balancing loss for MoE when requested
+    aux_loss = None
+    if kwargs.get("output_router_logits", False):
+        aux_loss = load_balancing_loss_func(
+            outputs.router_logits,
+            self.config.text_config.num_experts,
+            self.config.text_config.num_experts_per_tok,
+            attention_mask,
+        )
+        # If we computed training loss, add the scaled aux loss to it
+        if loss is not None and aux_loss is not None:
+            loss = loss + self.config.text_config.router_aux_loss_coef * aux_loss.to(loss.device)
+
     if not return_dict:
         output = (logits,) + outputs[1:]
         return (loss,) + output if loss is not None else output
@@ -100,5 +116,6 @@ def lce_forward(
         past_key_values=outputs.past_key_values,
         hidden_states=outputs.hidden_states,
         attentions=outputs.attentions,
-        rope_deltas=outputs.rope_deltas
+        rope_deltas=outputs.rope_deltas,
+        aux_loss=aux_loss,
     )
