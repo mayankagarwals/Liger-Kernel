@@ -67,6 +67,7 @@ def _liger_qwen3_vl_apply_rotary_pos_emb_vision(q, k, cos, sin, position_ids=Non
     """
 
     orig_q_dtype, orig_k_dtype = q.dtype, k.dtype
+
     q = q.to(torch.float32)
     k = k.to(torch.float32)
 
@@ -85,6 +86,11 @@ def _liger_qwen3_vl_apply_rotary_pos_emb_vision(q, k, cos, sin, position_ids=Non
     sin = sin.to(torch.float32)
 
     q_out, k_out = liger_rotary_pos_emb(q, k, cos, sin, position_ids=position_ids, unsqueeze_dim=unsqueeze_dim)
+
+    if reshape_for_kernel:
+        q_out = q_out.squeeze(0).permute(1, 0, 2)
+        k_out = k_out.squeeze(0).permute(1, 0, 2)
+
 
     if reshape_for_kernel:
         q_out = q_out.squeeze(0).permute(1, 0, 2)

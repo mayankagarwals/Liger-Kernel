@@ -119,7 +119,6 @@ except ImportError:
     QWEN2_5_VL_AVAILABLE = False
 
 
-
 try:
     # Qwen2.5-VL is only available in transformers>=4.57.0
     import transformers
