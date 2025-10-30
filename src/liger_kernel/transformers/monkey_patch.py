@@ -68,35 +68,15 @@ def _liger_qwen3_vl_apply_rotary_pos_emb_vision(q, k, cos, sin, position_ids=Non
 
     orig_q_dtype, orig_k_dtype = q.dtype, k.dtype
 
-    q = q.to(torch.float32)
-    k = k.to(torch.float32)
+    q = q.to(torch.float32).unsqueeze(0)
+    k = k.to(torch.float32).unsqueeze(0)
 
-    reshape_for_kernel = False
-    if q.dim() == 3:
-        reshape_for_kernel = True
-        q = q.permute(1, 0, 2).unsqueeze(0)
-        k = k.permute(1, 0, 2).unsqueeze(0)
-
-    if cos.dim() == 2:
-        cos = cos.unsqueeze(0)
-    if sin.dim() == 2:
-        sin = sin.unsqueeze(0)
-
-    cos = cos.to(torch.float32)
-    sin = sin.to(torch.float32)
+    cos = cos.to(torch.float32).unsqueeze(0)
+    sin = sin.to(torch.float32).unsqueeze(0)
 
     q_out, k_out = liger_rotary_pos_emb(q, k, cos, sin, position_ids=position_ids, unsqueeze_dim=unsqueeze_dim)
 
-    if reshape_for_kernel:
-        q_out = q_out.squeeze(0).permute(1, 0, 2)
-        k_out = k_out.squeeze(0).permute(1, 0, 2)
-
-
-    if reshape_for_kernel:
-        q_out = q_out.squeeze(0).permute(1, 0, 2)
-        k_out = k_out.squeeze(0).permute(1, 0, 2)
-
-    return q_out.to(orig_q_dtype), k_out.to(orig_k_dtype)
+    return q_out.to(orig_q_dtype).squeeze(0), k_out.to(orig_k_dtype).squeeze(0)
 
 
 def _patch_rms_norm_module(module, offset=0.0, eps=1e-6, casting_mode="llama", in_place=True, row_mode=None):
@@ -1718,6 +1698,11 @@ def apply_liger_kernel_to_qwen3_vl(
     from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
     from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
     from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel
+
+    if rope:
+        modeling_qwen3_vl.apply_rotary_pos_emb = liger_rotary_pos_emb
+        modeling_qwen3_vl.apply_rotary_pos_emb_vision = _liger_qwen3_vl_apply_rotary_pos_emb_vision
+
 
     if rms_norm:
         modeling_qwen3_vl.Qwen3VLTextRMSNorm = LigerRMSNorm
