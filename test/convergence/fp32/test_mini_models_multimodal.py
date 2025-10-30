@@ -676,6 +676,19 @@ Yes, the tokenizer will be absolutely useless. Mainly for testing so its okay.
 
         '''
 Wraps that raw tokenizer object in the model-specific fast tokenizer class so you get all the HF tokenizer APIs and Qwen-specific settings (special tokens, model max length, etc.).
+
+we can use the following for qwen3 
+qwen_tokenizer = Qwen2TokenizerFast(tokenizer_object=tokenizer_base, **tokenizer_config)
+image_processor = Qwen2VLImageProcessor(patch_size=16, temporal_patch_size=2, merge_size=2)
+video_processor = Qwen3VLVideoProcessor()
+return Qwen3VLProcessor(
+    image_processor=image_processor,
+    video_processor=video_processor,
+    tokenizer=qwen_tokenizer,
+)
+
+Proof is in Qwen3VLProcessor docstring itself. it expects Qwen2TokenizerFast, Qwen2VLImageProcessor,  Qwen3VLVideoProcessor
+as for patch_size, temporarl_patch_size, merge_size look at init of Qwen3VLVisionConfig 
         '''
         qwen_tokenizer = Qwen2TokenizerFast(tokenizer_object=tokenizer_base, **tokenizer_config)
         image_processor = Qwen2VLImageProcessor()
@@ -934,7 +947,7 @@ If you prefer to skip manual placeholder handling, use processor.apply_chat_temp
 Shapes/dtypes you’ll see on the first example:
 input_ids: torch.Size([1, 1024]), torch.int64. Because padding side is left, the first ~990 positions are pad id (fast_tokenizer.pad_token_id), then you hit the multimodal span.
 attention_mask: torch.Size([1, 1024]), torch.int64, with zeros for the left pad and ones starting at the first real token (e.g. indices 993: in my run).
-pixel_values: torch.Size([16, 1176]), torch.float32. Qwen3 inherits the Qwen2-VL image processor, so the 64×64 procedural image is resized to 56×56, split into a 4×4 spatial grid, merged in 2×2 blocks, and flattened—hence 16 patch vectors, each of length 1 176.
+pixel_values: torch.Size([16, 1536]), torch.float32. see below
 image_grid_thw: torch.Size([1, 3]), torch.int64, with value tensor([[1, 4, 4]]), telling you there’s 1 “time step” and a 4×4 patch lattice. The processor uses this to 
 
 Token sample (ids around the image span):
@@ -949,8 +962,13 @@ First Citizen:<|im_end|>
 pixel_values are already normalized to roughly [-1.79, 1.75]; the single bright scan line you inject appears as the max-valued row. The rest of the values are close to the CLIP mean offset.
 
  How did we get at this pixel count? 
- Start from our procedural tensor (3×64×64). Before patching, the helper smart_resize forces height/width to be divisible by patch_size * merge_size. With patch_size=14 and merge_size=2, the factor is 28. round(64/28)=2, so the image becomes 56×56. This still satisfies the min/max pixel constraints, so no further scaling happens.
-Next, the processor rescale/normalizes the float values, flips to channels‑first, and flattens out the patch grid. Because grid_h = resized_height / patch_size = 56 / 14 = 4 and grid_w = 4, a still image yields a 4×4 lattice. temporal_patch_size is 2, so the single frame is duplicated once to make the time axis divisible by 2; the computed grid_t becomes 1.
+ Start from our procedural tensor (3×64×64). Before patching, the helper smart_resize forces height/width to be divisible by patch_size * merge_size. With patch_size=16 and merge_size=2, the factor is 32. round(64/32)=2, so the image stays same. This still satisfies the min/max pixel constraints, so no further scaling happens.
+Next, the processor rescale/normalizes the float values, flips to channels‑first, and flattens out the patch grid. Because grid_h = resized_height / patch_size = 64 / 16 = 4 and grid_w = 4, a still image yields a 4×4 lattice. 
+Each path is 3 (channel) x 2 (temporal copy) x 16 x 16 (patch) = 1536 
+
+We have 4x4 of these so 16 
+
+temporal_patch_size is 2, so the single frame is duplicated once to make the time axis divisible by 2; the computed grid_t becomes 1.
 When the tensor is reshaped, each spatial cell packs an entire 2×14×14 chunk for all three channels. The feature dimension is therefore 3 (channels) × 2 (temporal_patch_size) × 14 × 14 = 1176. The total number of tokens is grid_t × grid_h × grid_w = 1 × 4 × 4 = 16.
 That’s why you see pixel_values with shape (16, 1176) (and dtype torch.float32) when iterating train_dataset for mini_qwen3_vl. Each row is a flattened patch embedding, and the accompanying image_grid_thw = tensor([[1, 4, 4]]) records the (t, h, w) grid so the processor can reconstruct placeholder counts when it reencodes the text.
     
@@ -966,15 +984,18 @@ Downstream, both the placeholder expansion (num_image_tokens = image_grid_thw.pr
     train_dataset = (
         load_dataset("text", data_files={"train": UNTOKENIZED_DATASET_PATH}, split="train")
         '''
-        When you use load_dataset("text", data_files={"train": UNTOKENIZED_DATASET_PATH}, split="train"), Hugging Face turns the plain-text file into a table-like dataset
+        When you use load_dataset("text", data_files={"train": resources/tiny_shakespeare.txt}, split="train"), Hugging Face turns the plain-text file into a table-like dataset
         Once loaded, the dataset behaves like:
 
         train_dataset.column_names → ["text"]
         train_dataset[0] → {"text": "First Citizen:"}
 
+        Split is done as new line. so every line is a row
+
         '''
         .to_iterable_dataset()  # only map examples as-needed and on-demand
         .map(generate_procedural_image, with_indices=True) # with_indices=True tells Hugging Face Datasets to call the mapping function as generate_procedural_image(example, index) instead of just generate_procedural_image(example)
+        # Now we have train_dataset[0] → {"text": "First Citizen:", "image": 3 x 64 x 64 garbage where every channel's some row has all white rest zero }
         .map(apply_chat_template)
         .map(preprocess_function, remove_columns=["text", "image"]) # drop raw text and image columns
     )
@@ -993,10 +1014,10 @@ def create_model(model_name):
 
 def run_mini_model_multimodal(
     model_name="mini_qwen2_vl",
-    num_steps=100,
-    dtype=torch.bfloat16,
-    lr=1e-5,
-    with_liger=False,
+    num_steps=100, #32 for qwen3_vl
+    dtype=torch.bfloat16, # torch.float32 for fp32
+    lr=1e-5, # 0.0001
+    with_liger=False, # we test on both configurations 
 ):
     # If we move it to the beginning of test_mini_model, the two runs are initialized with different weights.
     # This is due to RNG (Random Number Generator). The formula of RNG progression is x_(n+1) = (a * x_n + c) % m
@@ -1006,7 +1027,7 @@ def run_mini_model_multimodal(
     set_seed(42)
 
     revert_kwargs = {"model_config": MINI_MODEL_SETUPS[model_name]}
-    if "mllama" in model_name or "llama4" in model_name:
+    if "mllama" in model_name or "llama4" in model_name: # skipped for qwen3 flows
         revert_kwargs["model_type"] = "conditional_generation"
 
     if with_liger is True:
@@ -1042,6 +1063,25 @@ def run_mini_model_multimodal(
     model.gradient_checkpointing_enable()
 
     train_dataset = create_multimodal_dataset(model_name)
+
+    '''
+    What are we doing in multimodal collate: 
+    we got the following (see above for explanation): 
+    input_ids: torch.Size([1, 1024]),
+attention_mask: torch.Size([1, 1024]),
+pixel_values: torch.Size([16, 1176]), 
+image_grid_thw: torch.Size([1, 3]), 
+
+Simply concatenate across batch size (here 2) everything . So for batch size 2 
+
+    input_ids: torch.Size([2, 1024]),
+attention_mask: torch.Size([2, 1024]),
+pixel_values: torch.Size([32, 1176]), 
+image_grid_thw: torch.Size([2, 3]), 
+
+Moreover, we also add labels and shift labels. Labels is just input_ids clone. Shift labels is input_ids clone shifted by one. we maintain same shape by adding one extra pad at end in shift labels (-100)
+    '''
+
     loader = DataLoader(train_dataset, batch_size=2, shuffle=False, collate_fn=multimodal_collate_fn)
     loader_iter = iter(loader)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
