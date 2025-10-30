@@ -1648,14 +1648,12 @@ def apply_liger_kernel_to_qwen3_vl(
     rope: bool = False,
     cross_entropy: bool = False,
     fused_linear_cross_entropy: bool = True,
-    rms_norm: bool = False,
+    rms_norm: bool = True,
     swiglu: bool = False,
     model: PreTrainedModel = None,
 ) -> None:
-  
     """
-    Apply Liger kernels to replace original implementation in HuggingFace Qwen2.5-VL models.
-    NOTE: Qwen2.5-VL is not available in transformers<4.48.2
+    Apply Liger kernels to replace original implementation in HuggingFace Qwen3-VL models.
 
     Args:
         cross_entropy (bool): Whether to apply Liger's cross entropy loss. Default is False.
@@ -1664,75 +1662,120 @@ def apply_liger_kernel_to_qwen3_vl(
             `cross_entropy` and `fused_linear_cross_entropy` cannot both be True.
             If `fused_linear_cross_entropy` is True, the logits will not be materialized but more memory efficient.
         rms_norm (bool): Whether to apply Liger's RMSNorm. Default is True.
-        swiglu (bool): Whether to apply Liger's SwiGLU MLP. Default is True.
+        swiglu (bool): Whether to apply Liger's SwiGLU MLP. Default is False.
         model (PreTrainedModel): The model instance to apply Liger kernels to, if the model has already been
         loaded. Default is None.
     """
 
-    if rope or cross_entropy or rms_norm or swiglu: 
-        raise NotImplementedError("Under development")
     assert not (cross_entropy and fused_linear_cross_entropy), (
         "cross_entropy and fused_linear_cross_entropy cannot both be True."
     )
 
+    if rope or cross_entropy or swiglu:
+        raise NotImplementedError(
+            "Qwen3-VL support currently provides fused linear cross entropy and RMSNorm patches only."
+        )
+
     from transformers.models.qwen3_vl import modeling_qwen3_vl
-    # from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VisionTransformerPretrainedModel
-    # from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
-    # from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLModel
-    # from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLTextModel
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel
 
     from liger_kernel.transformers.model.qwen3_vl import lce_forward as qwen3_vl_lce_forward
 
-    # if rope:
-    #     modeling_qwen2_5_vl.apply_multimodal_rotary_pos_emb = liger_multimodal_rotary_pos_emb
-    # if rms_norm:
-    #     modeling_qwen2_5_vl.Qwen2RMSNorm = LigerRMSNorm
-    # if cross_entropy:
-    #     modeling_qwen2_5_vl.CrossEntropyLoss = LigerCrossEntropyLoss
+    if rms_norm:
+        modeling_qwen3_vl.Qwen3VLTextRMSNorm = LigerRMSNorm
+
     if fused_linear_cross_entropy:
         if model is not None:
             model.forward = MethodType(qwen3_vl_lce_forward, model)
         else:
             modeling_qwen3_vl.Qwen3VLForConditionalGeneration.forward = qwen3_vl_lce_forward
-    # if swiglu:
-    #     modeling_qwen2_5_vl.Qwen2MLP = LigerSwiGLUMLP
 
-    # if model is not None:
-    #     # The model instance already exists, so we need to additionally patch the
-    #     # instance variables that reference already-instantiated modules
+    if model is not None and rms_norm:
+        if isinstance(model, (Qwen3VLForConditionalGeneration, Qwen3VLModel)):
+            text_model: Qwen3VLTextModel = model.language_model
+        elif isinstance(model, Qwen3VLTextModel):
+            text_model = model
+        else:
+            raise TypeError(
+                f"Unsupported Qwen3VL model type. `model` must be `Qwen3VLForConditionalGeneration`, `Qwen3VLModel` or `Qwen3VLTextModel`. Got: {type(model)}"
+            )
 
-    #     if isinstance(model, (Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLModel)):
-    #         # Note: language_model and visual properties can be accessed throught conditional class for BC.
-    #         # Not sure if it is subject to changes in the future.
-    #         # Reference: https://github.com/huggingface/transformers/blob/v4.52.4/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py#L1823
-    #         text_model: Qwen2_5_VLTextModel = model.language_model
-    #         vision_model: Qwen2_5_VisionTransformerPretrainedModel = model.visual
-    #     elif isinstance(model, Qwen2_5_VLTextModel):
-    #         text_model: Qwen2_5_VLTextModel = model
-    #         vision_model = None
-    #     else:
-    #         # Note: Currently there's no support for patching vision model only. Feel free to raise an issue if needed.
-    #         raise TypeError(
-    #             f"Unsupported Qwen2VL model type. `model` must be `Qwen2VLForConditionalGeneration`, `Qwen2VLModel` or `Qwen2VLTextModel`. Got: {type(model)}"
-    #         )
+        _patch_qwen3_vl_rms_norm = partial(_patch_rms_norm_module, offset=0.0, casting_mode="llama")
 
-    #     if vision_model is not None:
-    #         # Patch Qwen2_5_VisionTransformerPretrainedModel
-    #         for vision_block in model.visual.blocks:
-    #             if rms_norm:
-    #                 _patch_rms_norm_module(vision_block.norm1)
-    #                 _patch_rms_norm_module(vision_block.norm2)
+        if text_model is not None:
+            _patch_qwen3_vl_rms_norm(text_model.norm)
+            for decoder_layer in text_model.layers:
+                _patch_qwen3_vl_rms_norm(decoder_layer.input_layernorm)
+                _patch_qwen3_vl_rms_norm(decoder_layer.post_attention_layernorm)
+                self_attn = getattr(decoder_layer, "self_attn", None)
+                if self_attn is not None:
+                    if hasattr(self_attn, "q_norm") and self_attn.q_norm is not None:
+                        _patch_qwen3_vl_rms_norm(self_attn.q_norm)
+                    if hasattr(self_attn, "k_norm") and self_attn.k_norm is not None:
+                        _patch_qwen3_vl_rms_norm(self_attn.k_norm)
 
-    #     if text_model is not None:
-    #         if rms_norm:
-    #             _patch_rms_norm_module(text_model.norm)
-    #         for decoder_layer in text_model.layers:
-    #             if swiglu:
-    #                 _patch_swiglu_module(decoder_layer.mlp, LigerSwiGLUMLP)
-    #             if rms_norm:
-    #                 _patch_rms_norm_module(decoder_layer.input_layernorm)
-    #                 _patch_rms_norm_module(decoder_layer.post_attention_layernorm)
 
+def apply_liger_kernel_to_qwen3_vl_moe(
+    rope: bool = False,
+    cross_entropy: bool = False,
+    fused_linear_cross_entropy: bool = False,
+    rms_norm: bool = True,
+    swiglu: bool = False,
+    model: PreTrainedModel = None,
+) -> None:
+    """
+    Apply Liger kernels to replace original implementation in HuggingFace Qwen3-VL MoE models.
+
+    Args:
+        cross_entropy (bool): Whether to apply Liger's cross entropy loss. Default is False.
+        fused_linear_cross_entropy (bool):
+            Whether to apply Liger's fused linear cross entropy loss. Default is False.
+        rms_norm (bool): Whether to apply Liger's RMSNorm. Default is True.
+        swiglu (bool): Whether to apply Liger's SwiGLU MLP. Default is False.
+        model (PreTrainedModel): The model instance to apply Liger kernels to, if the model has already been
+        loaded. Default is None.
+    """
+
+    assert not (cross_entropy and fused_linear_cross_entropy), (
+        "cross_entropy and fused_linear_cross_entropy cannot both be True."
+    )
+
+    if rope or cross_entropy or swiglu or fused_linear_cross_entropy:
+        raise NotImplementedError("Qwen3-VL-MoE support currently provides RMSNorm patches only.")
+
+    from transformers.models.qwen3_vl_moe import modeling_qwen3_vl_moe
+    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeForConditionalGeneration
+    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeModel
+    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextModel
+
+    if rms_norm:
+        modeling_qwen3_vl_moe.Qwen3VLMoeTextRMSNorm = LigerRMSNorm
+
+    if model is not None and rms_norm:
+        if isinstance(model, (Qwen3VLMoeForConditionalGeneration, Qwen3VLMoeModel)):
+            text_model: Qwen3VLMoeTextModel = model.language_model
+        elif isinstance(model, Qwen3VLMoeTextModel):
+            text_model = model
+        else:
+            raise TypeError(
+                f"Unsupported Qwen3VLMoe model type. `model` must be `Qwen3VLMoeForConditionalGeneration`, `Qwen3VLMoeModel` or `Qwen3VLMoeTextModel`. Got: {type(model)}"
+            )
+
+        _patch_qwen3_vl_moe_rms_norm = partial(_patch_rms_norm_module, offset=0.0, casting_mode="llama")
+
+        if text_model is not None:
+            _patch_qwen3_vl_moe_rms_norm(text_model.norm)
+            for decoder_layer in text_model.layers:
+                _patch_qwen3_vl_moe_rms_norm(decoder_layer.input_layernorm)
+                _patch_qwen3_vl_moe_rms_norm(decoder_layer.post_attention_layernorm)
+                self_attn = getattr(decoder_layer, "self_attn", None)
+                if self_attn is not None:
+                    if hasattr(self_attn, "q_norm") and self_attn.q_norm is not None:
+                        _patch_qwen3_vl_moe_rms_norm(self_attn.q_norm)
+                    if hasattr(self_attn, "k_norm") and self_attn.k_norm is not None:
+                        _patch_qwen3_vl_moe_rms_norm(self_attn.k_norm)
 
 
 def apply_liger_kernel_to_phi3(
@@ -2300,6 +2343,9 @@ MODEL_TYPE_TO_APPLY_LIGER_FN = {
     "qwen2_5_vl": apply_liger_kernel_to_qwen2_5_vl,
     "qwen2_5_vl_text": apply_liger_kernel_to_qwen2_5_vl,
     "qwen3_vl": apply_liger_kernel_to_qwen3_vl,
+    "qwen3_vl_text": apply_liger_kernel_to_qwen3_vl,
+    "qwen3_vl_moe": apply_liger_kernel_to_qwen3_vl_moe,
+    "qwen3_vl_moe_text": apply_liger_kernel_to_qwen3_vl_moe,
     "smollm3": apply_liger_kernel_to_smollm3,
     "phi3": apply_liger_kernel_to_phi3,
     "paligemma": apply_liger_kernel_to_paligemma,
