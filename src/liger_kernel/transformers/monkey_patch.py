@@ -65,9 +65,32 @@ def _liger_qwen3_vl_apply_rotary_pos_emb_vision(q, k, cos, sin, position_ids=Non
     """
 
     orig_q_dtype, orig_k_dtype = q.dtype, k.dtype
+
     q = q.to(torch.float32)
     k = k.to(torch.float32)
+
+    reshape_for_kernel = False
+    if q.dim() == 3:
+        # Vision attention provides tensors shaped (seq_len, num_heads, head_dim).
+        # Convert to (batch, num_heads, seq_len, head_dim) expected by the Liger kernel.
+        reshape_for_kernel = True
+        q = q.permute(1, 0, 2).unsqueeze(0)
+        k = k.permute(1, 0, 2).unsqueeze(0)
+
+    if cos.dim() == 2:
+        cos = cos.unsqueeze(0)
+    if sin.dim() == 2:
+        sin = sin.unsqueeze(0)
+
+    cos = cos.to(torch.float32)
+    sin = sin.to(torch.float32)
+
     q_out, k_out = liger_rotary_pos_emb(q, k, cos, sin, position_ids=position_ids, unsqueeze_dim=unsqueeze_dim)
+
+    if reshape_for_kernel:
+        q_out = q_out.squeeze(0).permute(1, 0, 2)
+        k_out = k_out.squeeze(0).permute(1, 0, 2)
+
     return q_out.to(orig_q_dtype), k_out.to(orig_k_dtype)
 
 
@@ -1738,7 +1761,7 @@ def apply_liger_kernel_to_qwen3_vl(
 def apply_liger_kernel_to_qwen3_vl_moe(
     rope: bool = True,
     cross_entropy: bool = False,
-    fused_linear_cross_entropy: bool = False,
+    fused_linear_cross_entropy: bool = True,
     rms_norm: bool = True,
     swiglu: bool = False,
     model: PreTrainedModel = None,
@@ -1778,8 +1801,11 @@ def apply_liger_kernel_to_qwen3_vl_moe(
         nn.functional.cross_entropy = liger_cross_entropy
 
     if fused_linear_cross_entropy:
-        raise NotImplementedError("Fused linear cross entropy is not supported for Qwen3-VL-MoE models.")
-
+        if model is not None:
+            model.forward = MethodType(qwen3_vl_lce_forward, model)
+        else:
+            modeling_qwen3_vl.Qwen3VLForConditionalGeneration.forward = qwen3_vl_lce_forward
+            
     if model is not None and rms_norm:
         if isinstance(model, (Qwen3VLMoeForConditionalGeneration, Qwen3VLMoeModel)):
             text_model: Qwen3VLMoeTextModel = model.language_model

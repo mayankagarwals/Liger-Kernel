@@ -1059,30 +1059,22 @@ def run_mini_model_multimodal(
         revert_kwargs["model_type"] = "conditional_generation"
 
     if with_liger is True:
-        if "qwen3_vl" in model_name:
-            kwargs = {
-                "rope": True,
-                "rms_norm": True,
-                "fused_linear_cross_entropy": False,
-                "cross_entropy": True,
-            }
+        kwargs = {
+            "rope": True,
+            "rms_norm": True,
+            "cross_entropy": False,
+        }
+
+        if "qwen2_5_vl" not in model_name and "llava" not in model_name:
+            kwargs["layer_norm"] = True
+
+        if "gemma" in model_name:
+            kwargs["geglu"] = True
         else:
-            kwargs = {
-                "rope": True,
-                "rms_norm": True,
-                "cross_entropy": False,
-            }
+            kwargs["swiglu"] = True
 
-            if "qwen2_5_vl" not in model_name and "llava" not in model_name:
-                kwargs["layer_norm"] = True
-
-            if "gemma" in model_name:
-                kwargs["geglu"] = True
-            else:
-                kwargs["swiglu"] = True
-
-            if "llava" in model_name:
-                apply_liger_kernel_to_llama(**kwargs)
+        if "llava" in model_name:
+            apply_liger_kernel_to_llama(**kwargs)
 
         MINI_MODEL_SETUPS[model_name].liger_kernel_patch_func(**kwargs)
     else:
