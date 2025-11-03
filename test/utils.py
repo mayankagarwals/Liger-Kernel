@@ -237,12 +237,49 @@ def train_bpe_tokenizer(special_tokens: List[str], unk_token: str = "<|unk|>"):
     if unk_token not in special_tokens:
         special_tokens.append(unk_token)
 
+    
+    '''
+    By not giving an alphabet, the alphabet is asked to be infered from data 
+    if a character doesn't appear during training its given as unk token 
+    '''
     tokenizer = Tokenizer(BPE(unk_token=unk_token))
-    trainer = BpeTrainer(special_tokens=special_tokens)
+    '''
+    Special tokens are control/marker tokens you reserve in the vocabulary with special behavior. In your BpeTrainer(special_tokens=...) they do three big things:
 
+Guarantee inclusion + fixed IDs
+They’re injected into the vocab even if never seen in data, so you can always emit them (e.g., <|bos|>, <|eos|>, <|pad|>, <|unk|>). This also stabilizes vocab size.
+
+Atomic / never split
+During training and encoding they’re treated as one indivisible token—BPE won’t try to merge inside them or break them apart. (They’re “protected” strings.)
+
+Semantic roles at runtime
+Frameworks (HF) attach meanings (BOS/EOS/UNK/PAD/SEP/MASK). Post-processors can auto-insert them; decoders keep them visible or can strip them as needed.
+
+    '''
+    trainer = BpeTrainer(special_tokens=special_tokens)
+ 
+    '''
+    Tokenize for whitespace and punctuations before running the merges
+    Whitespace() is just equivalent to .split(' ')?
+    Short answer: no.
+
+Whitespace() splits on word boundaries and punctuation, using a regex like \w+|[^\w\s]+.
+Example:
+"Hello there!" → ["Hello", "there", "!"] (the ! is isolated). 
+Hugging Face
++1
+
+.split(' ') only splits on the literal space; punctuation stays attached:
+"Hello there!" → ["Hello", "there!"].
+
+If you truly want “just like .split()”, use WhitespaceSplit() (it only splits on whitespace and doesn’t isolate punctuation):
+"Hello there!" → ["Hello", "there!"]
+
+
+    '''
     tokenizer.pre_tokenizer = Whitespace()
     file = [UNTOKENIZED_DATASET_PATH]
-    tokenizer.train(file, trainer)
+    tokenizer.train(file, trainer) # no training happened till now. This is where training is happening
 
     return tokenizer
 

@@ -638,7 +638,7 @@ def create_processor(model_name: str):
         )
         tokenizer_base = train_bpe_tokenizer( 
         '''
-        train a small tokenizer from just the added tokens 
+        train a small tokenizer
         {
   "151643": "<|endoftext|>",
   "151644": "<|im_start|>",
@@ -879,12 +879,16 @@ def create_multimodal_dataset(model_name: str):
         example["text"] = processor.tokenizer.apply_chat_template(conversation, tokenize=False)  
         '''
         
-        Since tokenize is false. It returns as string
-        <|im_start|>user
-<|vision_start|><|image_pad|><|vision_end|>
-Describe this image briefly.
-<|im_end|>
+        Since tokenize is false. It returns as string. Following is the exact output 
+
+/n
+<|im_start|>system
+You are a helpful assistant.<|im_end|>
+<|im_start|>user
+<|vision_start|><|image_pad|><|vision_end|>Describe this image.<|im_end|>
 <|im_start|>assistant
+test<|im_end|>
+
 That’s just a plain Python string. Notice the image placeholder lives between <|vision_start|> and <|vision_end|>, with an <|image_pad|> token standing in for “an image goes here”.
 If you later call the processor on this text and supply the image tensor, it will bind the image to that placeholder:
 
@@ -893,8 +897,10 @@ inputs = processor(
     images=your_pil_or_tensor_image,  # the actual image
     return_tensors="pt"
 )
-If multiple images as placeholders, that many should be supplied to processor. In our case, there is only one image.
+If multiple images (<|vision_start|><|image_pad|><|vision_end|>) as placeholders, that many should be supplied to processor. In our case, there is only one image.
 If you prefer to skip manual placeholder handling, use processor.apply_chat_template(..., tokenize=True, return_tensors="pt") and include the actual images inside the messages; it will do both steps in one go.
+       
+Not going through gpt but mostly stuff like <|image_pad|> is hardcoded. tokenizer just tells these are special tokens and keep them in library
         '''
         return example
 
@@ -924,25 +930,6 @@ If you prefer to skip manual placeholder handling, use processor.apply_chat_temp
 
             
     '''
-    ouput has the following shape
-    >>> example = next(iter(create_multimodal_dataset("mini_gemma3")))
-    >>> {k: (tuple(v.shape), v.dtype) for k, v in example.items()}
-    {'input_ids': ((1, 1024), torch.int64),
-    'attention_mask': ((1, 1024), torch.int64),
-    'token_type_ids': ((1, 1024), torch.int64),
-    'pixel_values': ((1, 3, 224, 224), torch.float32)}
-
-    >>> example["input_ids"][0][-16:]
-    tensor([  96,    8, 1060,    8,    7, 5908,  412,  770,   17,    8,  193,    8,
-            96,    8, 1060,    8])
-
-    >>> example["pixel_values"].min().item(), example["pixel_values"].max().item()
-    (-1.0, 1.0)
-
-    Note how image_pad is a special token that stores the knowledge of where the corresponding image would go from the image array
-    '''
-
-    '''
     For the Qwen3-VL branch in test/convergence/fp32/test_mini_models_multimodal.py:915, each row coming out of train_dataset is a dict with four tensor entries: input_ids, attention_mask, pixel_values, and image_grid_thw (the raw text/image columns were dropped in the last map call).
 Shapes/dtypes you’ll see on the first example:
 input_ids: torch.Size([1, 1024]), torch.int64. Because padding side is left, the first ~990 positions are pad id (fast_tokenizer.pad_token_id), then you hit the multimodal span.
@@ -969,16 +956,16 @@ Each path is 3 (channel) x 2 (temporal copy) x 16 x 16 (patch) = 1536
 We have 4x4 of these so 16 
 
 temporal_patch_size is 2, so the single frame is duplicated once to make the time axis divisible by 2; the computed grid_t becomes 1.
-When the tensor is reshaped, each spatial cell packs an entire 2×14×14 chunk for all three channels. The feature dimension is therefore 3 (channels) × 2 (temporal_patch_size) × 14 × 14 = 1176. The total number of tokens is grid_t × grid_h × grid_w = 1 × 4 × 4 = 16.
-That’s why you see pixel_values with shape (16, 1176) (and dtype torch.float32) when iterating train_dataset for mini_qwen3_vl. Each row is a flattened patch embedding, and the accompanying image_grid_thw = tensor([[1, 4, 4]]) records the (t, h, w) grid so the processor can reconstruct placeholder counts when it reencodes the text.
     
-    But the 1176 has a copy of image. doesnt that cause issues
+Q: Every 1536, has two identical images for still images. doesn't that cause issues in training?
 
-
-That duplication isn’t a bug; it’s how the Qwen2/Qwen3 vision stack expects its inputs. The image processor always pads the “temporal” axis up to temporal_patch_size (set to 2) before it flattens the patches, even for a still frame. So each lattice cell contributes 3 × 2 × 14 × 14 = 1176 numbers: two identical 14×14 patches stacked in time.
-
-Downstream, both the placeholder expansion (num_image_tokens = image_grid_thw.prod() // merge_size**2) and the vision encoder itself are written with that 2× patch layout in mind. Every multimodal model variant that shares this processor (Qwen2-VL, Qwen2.5-VL, Qwen3-VL) is trained with the same convention, so the duplicate frame doesn’t break anything—each <|image_pad|> slot just carries the flattened tensor the model already knows how to interpret.
-    
+ANS:
+The preprocessing code you’re calling (transformers/models/qwen2_vl/image_processing_qwen2_vl.py (lines 274-305)) does exactly what you described: it pads the temporal stack so its length is divisible by temporal_patch_size, then reshapes into grid_t * grid_h * grid_w patches, each flattened to length channel * temporal_patch_size * patch_size * patch_size = 1536. For a single still image, the padding step duplicates the lone frame, which makes the flattened vector look like two identical halves.
+That duplication is expected and doesn’t derail training:
+The metadata returned alongside the pixels (grid_t) still tells the model there’s one real time step. The downstream vision tower knows how many temporal chunks are actually present.
+The first linear layer that consumes the 1536-D vector can learn how to combine the two temporal slices. For static images it effectively learns to average or ignore the redundant copy; for real videos it keeps the information from distinct frames.
+This matches how Qwen2-VL was trained upstream, so keeping the same representation preserves compatibility with the pretrained weights. If you dropped the duplicate you’d change the input dimensionality and break alignment with the checkpoint.
+So the duplicate patch content is just bookkeeping to satisfy the temporal patching geometry; it doesn’t inject contradictory gradients because the model expects it and was trained with exactly that behavior. If you ever feed true multi-frame clips, those extra slots carry non-identical content and the same machinery handles them without any special-casing.
     '''
 
     train_dataset = (
@@ -1069,14 +1056,14 @@ def run_mini_model_multimodal(
     we got the following (see above for explanation): 
     input_ids: torch.Size([1, 1024]),
 attention_mask: torch.Size([1, 1024]),
-pixel_values: torch.Size([16, 1176]), 
+pixel_values: torch.Size([16, 1536]), 
 image_grid_thw: torch.Size([1, 3]), 
 
 Simply concatenate across batch size (here 2) everything . So for batch size 2 
 
     input_ids: torch.Size([2, 1024]),
 attention_mask: torch.Size([2, 1024]),
-pixel_values: torch.Size([32, 1176]), 
+pixel_values: torch.Size([32, 1536]), 
 image_grid_thw: torch.Size([2, 3]), 
 
 Moreover, we also add labels and shift labels. Labels is just input_ids clone. Shift labels is input_ids clone shifted by one. we maintain same shape by adding one extra pad at end in shift labels (-100)
