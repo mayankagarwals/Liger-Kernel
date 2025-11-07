@@ -887,7 +887,7 @@ You are a helpful assistant.<|im_end|>
 <|im_start|>user
 <|vision_start|><|image_pad|><|vision_end|>Describe this image.<|im_end|>
 <|im_start|>assistant
-test<|im_end|>
+text<|im_end|>
 
 That’s just a plain Python string. Notice the image placeholder lives between <|vision_start|> and <|vision_end|>, with an <|image_pad|> token standing in for “an image goes here”.
 If you later call the processor on this text and supply the image tensor, it will bind the image to that placeholder:
