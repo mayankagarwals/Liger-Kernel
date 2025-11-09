@@ -48,7 +48,7 @@ from test.utils import revert_liger_kernel_to_qwen3_vl_moe
 from test.utils import revert_liger_kernel_to_smolvlm2
 from test.utils import set_seed
 from test.utils import train_bpe_tokenizer
-
+from test.profiler_utils import StepProfiler
 try:
     # Qwen2-VL is only available in transformers>=4.52.4
     import transformers
@@ -1316,15 +1316,18 @@ def run_mini_model_multimodal(
 
     loss_list = []
 
-    for i in range(num_steps):
-        batch = next(loader_iter).to(model.device)
-        optimizer.zero_grad()
-        output = model(**batch)
-        output.loss.backward()
-        optimizer.step()
+    with StepProfiler(log_dir="out/prof_qwen", wait=1, warmup=1, active=4, repeat=2) as prof:
+        for i in range(num_steps):
+            batch = next(loader_iter).to(model.device)
+            optimizer.zero_grad()
+            output = model(**batch)
+            output.loss.backward()
+            optimizer.step()
 
-        print(f"Step {i}, Loss: {output.loss.item()}")
-        loss_list.append(output.loss.item())
+            print(f"Step {i}, Loss: {output.loss.item()}")
+            loss_list.append(output.loss.item())
+
+            prof.step()
 
     model.eval()
     eval_batch = next(loader_iter).to(model.device)
