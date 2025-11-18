@@ -54,9 +54,9 @@ def liger_cross_entropy(
 
 
 def liger_fused_linear_cross_entropy(
-    input,
-    weight,
-    target,
+    input, # 2 x 1024 x 512
+    weight,#  512 x 32000
+    target, # [2, 1024]
     bias=None,
     ce_weight=None,
     ignore_index: int = -100,

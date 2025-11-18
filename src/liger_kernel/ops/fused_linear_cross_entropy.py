@@ -14,9 +14,9 @@ MAX_FUSED_SIZE = 65536 // 2
 
 
 def fused_linear_cross_entropy_forward(
-    _input,
-    weight,
-    target,
+    _input,# 2 x 1024 x 512
+    weight,#  512 x 32000
+    target,# [2, 1024]
     ce_weight=None,
     bias=None,
     ignore_index=-100,
@@ -29,20 +29,22 @@ def fused_linear_cross_entropy_forward(
     use_token_scaling=False,
 ):
     assert isinstance(return_z_loss, bool), f"return_z_loss must be True or False. Got: {return_z_loss}"
-    device = _input.device
+    device = _input.device # device which input is on
 
     input_requires_grad = _input.requires_grad
 
-    # inputs have shape: BT x H
-    # materialized activations will have shape: BT x V
-    # the increase in memory = BT x V
+    # inputs have shape: BT x H.let's take our example 2 x 1024 x 512
+    # materialized activations will have shape: BT x V. 2 x 1024 x 32000
+    # the increase in memory = BT x V well approximately
     # reduction can be achieved by partitioning the number of tokens BT into smaller chunks.
     # for ex: if we were to achieve the same memory consumption as BT x H, then the chunk size should be:
-    # inc_factor = (V+H-1)//H, chunk_size = (BT + inc_factor - 1)//inc_factor
+    # inc_factor = (V+H-1)//H,  ceil division of 32000/512  = 63
+    # chunk_size = (BT + inc_factor - 1)//inc_factor. Chunk size says if we make 63 chunks of 2 x 1024 . how much is each. will 
+    #  Ceil division of (2 x 1024 )/63 = 33. eseentially we solve for 33 tokens at a time
     # for ex: BT = 4096*4, V = 32000, H = 4096 ==> inc_factor = 8, chunk_size = 2048
     BT, H = _input.shape
     V = weight.shape[0]
-    BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
+    BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V)) # min min( 65536 // 2, 32768 ) -> 32768
 
     inc_factor = triton.cdiv(V, H)  # (V + H - 1) // H
     chunk_size = triton.next_power_of_2(triton.cdiv(BT, inc_factor))  # (BT + inc_factor - 1) // inc_factor
@@ -261,9 +263,9 @@ class LigerFusedLinearCrossEntropyFunction(torch.autograd.Function):
     @amp_custom_fwd
     def forward(
         ctx,
-        _input,
-        weight,
-        target,
+        _input, # 2 x 1024 x 512
+        weight,#  512 x 32000
+        target,# [2, 1024]
         bias=None,
         ce_weight=None,
         ignore_index=-100,
