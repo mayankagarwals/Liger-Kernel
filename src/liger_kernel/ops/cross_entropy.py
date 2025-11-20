@@ -24,15 +24,15 @@ else:
 
 @triton.jit
 def liger_cross_entropy_kernel(
-    X_ptr,
-    X_stride,
-    Y_ptr,
-    Y_stride,
+    X_ptr, #  # chunk_size x V.   -> 128x 50257
+    X_stride, # stride for x_pr
+    Y_ptr, # chunk_size -> 128
+    Y_stride, # always 1 
     weight_ptr,
     loss_ptr,
     z_loss_ptr,
     loss_stride,
-    n_cols,
+    n_cols, # 50257
     n_non_ignore,
     sum_non_ignore_weight,
     weight_sum,
