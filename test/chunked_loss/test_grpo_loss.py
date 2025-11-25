@@ -429,7 +429,7 @@ def test_correctness(
     ],
 )
 @pytest.mark.parametrize(
-    "scalar, dtype, atol, rtol",
+    "scalar, dtype, atol, rtol", # TODO: understand the below code and come back to see wy these numbers are okay?
     [
         (1.0, torch.bfloat16, 5e-2, 5e-1),
         (1.0, torch.float32, 1e-5, 5e-4),
@@ -448,21 +448,21 @@ def test_functional_correctness(
     bias,
 ):
     # Reset torch compiler cache for each parameter of the test case
-    torch.compiler.reset()
+    torch.compiler.reset() # TODO: Why?
     max_completion_length = T
-    _input = torch.randn(B, T, H, device=device, dtype=dtype) * scalar
-    input1 = _input.detach().clone().requires_grad_(True)
+    _input = torch.randn(B, T, H, device=device, dtype=dtype) * scalar # why multiply with scalar
+    input1 = _input.detach().clone().requires_grad_(True) # why? detatch, clone,requires grad
     input2 = _input.detach().clone().requires_grad_(True)
 
     _weight = torch.randn(V, H, device=device, dtype=dtype) * scalar
     weight1 = _weight.detach().clone().requires_grad_(True)
     weight2 = _weight.detach().clone().requires_grad_(True)
 
-    selected_token_ids = torch.randint(0, V, (B, T), device=device)
+    selected_token_ids = torch.randint(0, V, (B, T), device=device) # make some BXT shape of valid tokens
 
-    attention_mask = torch.ones(B, T, device=device)
+    attention_mask = torch.ones(B, T, device=device) # for a given bXT is it valid token (not padding, etc)
 
-    advantages = torch.rand(B, device=device, dtype=dtype)
+    advantages = torch.rand(B, device=device, dtype=dtype) # Remember how advantage is jsut reward for that sequence
 
     if bias:
         _bias = torch.randn(V, device=device, dtype=dtype) * scalar

@@ -124,25 +124,25 @@ class LigerFusedLinearGRPOFunction(LigerFusedLinearPPOBase):
     def forward(
         cls,
         ctx,
-        _input,
-        weight,
-        selected_token_ids,
-        attention_mask,
-        advantages,
-        bias=None,
+        _input, # 3x47x31. -> BXTXH
+        weight, # 123 x 31
+        selected_token_ids, # 3 x 47
+        attention_mask,# 3 x 47
+        advantages,# 3 
+        bias=None, # 123
         ref_per_token_logps=None,
         old_per_token_logps=None,
-        ref_input=None,
-        ref_weight=None,
-        ref_bias=None,
+        ref_input=None, # 3x47x31. -> BXTXH
+        ref_weight=None, # 123 x 31 with slight increase -> VXH
+        ref_bias=None, # 123 with slight increase -> V
         beta=0.04,
         epsilon_low=0.2,
         epsilon_high=0.2,
         loss_type="dapo",
-        max_completion_length=None,
+        max_completion_length=None, # T
         importance_sampling_level="token",
         temperature=1.0,
-        compiled=True,
+        compiled=True, # False
         use_ref_model=True,
         chunk_size=1,
     ):

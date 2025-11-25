@@ -26,7 +26,7 @@ class LigerFusedLinearPPOBase(torch.autograd.Function):
         bias=None,
         ref_per_token_logps=None,
         old_per_token_logps=None,
-        ref_input=None,
+        ref_input=None,  # 3x47x31. -> BXTXH
         ref_weight=None,
         ref_bias=None,
         epsilon_low=0.2,
@@ -67,13 +67,13 @@ class LigerFusedLinearPPOBase(torch.autograd.Function):
             use_ref_model: Whether to use a reference model
             chunk_size: Size of chunks for processing in other loss modules
         """
-        if use_ref_model:
+        if use_ref_model: # for us this is true, but we provide ref_input
             assert ref_per_token_logps is not None or ref_input is not None, (
                 "If use_ref_model is True, ref_per_token_logps or ref_input must be provided"
             )
             if ref_per_token_logps is not None and ref_input is not None:
                 raise Warning("Both ref_per_token_logps and ref_input are provided. Using ref_per_token_logps.")
-        if loss_type == "dr_grpo":
+        if loss_type == "dr_grpo": # not our case, we cover dapo
             assert max_completion_length is not None, "max_completion_length must be provided for loss_type 'dr_grpo'"
         # Initialize accumulators
         loss_acc = torch.zeros((), device=_input.device, dtype=torch.float32)
@@ -162,7 +162,7 @@ class LigerFusedLinearPPOBase(torch.autograd.Function):
                 else:
                     aggregated_metrics[i].append(metric)
 
-        if compiled:
+        if compiled: # false for our case
             # TODO: Figure out what is better to compile here
             # accumulate_chunk = torch.compile(accumulate_chunk)
             fused_fwd_bwd = torch.compile(fused_fwd_bwd)
