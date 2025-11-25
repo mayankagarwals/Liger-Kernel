@@ -4,6 +4,7 @@ from liger_kernel.ops.swiglu import LigerSiLUMulFunction
 
 
 class LigerSwiGLUMLP(nn.Module):
+    # Nothing different than what is available outside apart from LigerSiLUMulFunction. Three bias-free linear layers
     def __init__(self, config):
         super().__init__()
         self.config = config

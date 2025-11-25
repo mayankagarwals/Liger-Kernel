@@ -45,6 +45,20 @@ def ensure_contiguous(fn):
 def calculate_settings(n):
     # reference: https://github.com/unslothai/unsloth/blob/fd753fed99ed5f10ef8a9b7139588d9de9ddecfb/unsloth/kernels/utils.py#L43
 
+
+'''
+The function picks Triton kernel launch parameters for a 1‑D workload of length n.
+
+It rounds n up to the next power of 2 (BLOCK_SIZE) so kernels can use power‑of‑2 block sizes that hardware likes.
+If that block size would exceed 65,536 threads, it raises to avoid launching an oversized kernel.
+It chooses num_warps (groups of 32 threads on NVIDIA, 64 on AMD) based on how large the block is:
+default 4 warps for small blocks
+8 warps when BLOCK_SIZE >= 2048
+16 warps when BLOCK_SIZE >= 8192
+32 warps for very large blocks (>= 32768), but only 16 on HIP (AMD) where 32 warps would be too many.
+Returns (BLOCK_SIZE, num_warps) for use in a Triton @triton.jit kernel launch.
+'''
+
     MAX_FUSED_SIZE = 65536
     BLOCK_SIZE = triton.next_power_of_2(n)
     if BLOCK_SIZE > MAX_FUSED_SIZE:
