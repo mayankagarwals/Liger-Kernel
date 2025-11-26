@@ -48,7 +48,26 @@ class LigerTiledMLPFunction(torch.autograd.Function):
 
         # x.shape could be [bs, seqlen, hidden_size] or [seqlen, hidden_size] (moe experts)
         x_shards = list(torch.chunk(x, chunks=shards, dim=-2))
-        with torch.no_grad():
+        '''
+        Forward deliberately ran each shard under torch.no_grad(), so its activations/graph were never kept. By backward time there’s nothing to backprop through unless we rebuild the graph. Recomputing output = fn(mlp_module, x_shard) inside torch.enable_grad() regenerates the shard’s activations and graph on-the-fly; then autograd.backward uses that graph with the shard’s upstream grad to fill the preallocated x_grad slice. This trades extra compute (~2× MLP) for much lower activation memory, which is the whole point of the tiled MLP.
+
+        Activation footprint: baseline vs tiled
+
+Baseline (no tiling, no recompute): saved tensors are roughly x (hidden), plus a/b from gate+up (intermediate each), plus the down-proj input c (intermediate). Elements per token ≈ hidden_size + 3*intermediate_size. In bf16/fp16 that’s ×2 bytes.
+Tiled with recompute: forward saves only x (hidden). During backward each shard temporarily materializes a/b/c for that shard only, then frees them.
+Example (bf16, B=1, seq=8k, hidden=4096, intermediate=11008 ~2.7× hidden):
+
+Baseline saved activations: (4096 + 3*11008) * 8192 ≈ 304M elements ≈ 608 MB.
+Tiled saved activations: 4096 * 8192 ≈ 33.6M elements ≈ 67 MB.
+Per-shard working set during backward (default shards=ceil(seq/hidden)=2 → shard_len≈4096): 3*11008*4096 ≈ 135M elements ≈ 270 MB live one shard at a time. Peak ≈ 67 MB (saved) + 270 MB (working) ≈ 337 MB, still ~1.8× smaller than baseline; if num_shards is larger, the working set drops proportionally.
+Longer seq (seq=32k, same dims):
+
+Baseline saved: ≈2.4 GB.
+Tiled saved: ≈268 MB; working set per shard still ≈270 MB. Peak ≈538 MB → ~4–5× smaller.
+So tiling removes the need to keep full-sequence intermediate activations; only the input is saved, and recompute + sharding bounds the transient activations to one shard at a time.
+
+        '''
+        with torch.no_grad(): # run deliberately in forward so grad is not kept
             output_shards = [fn(mlp_module, x_shard) for x_shard in x_shards]
         output_unsharded = torch.cat(output_shards, dim=-2)
 
@@ -63,6 +82,13 @@ class LigerTiledMLPFunction(torch.autograd.Function):
         shards = ctx.shards
 
         x_requires_grad = x.requires_grad
+        '''
+        x.detach() drops any existing autograd history on the saved input so it becomes a fresh leaf for the recompute. That way:
+
+The backward recomputation builds a new graph from x_shard to output without trying to reuse whatever graph x originally came from.
+We can manually wire .grad to x_grad and return the gradient upstream, instead of autograd attempting to backprop through an old graph.
+After detaching, they restore requires_grad_ to the original value so grads still flow to x (via the returned x_grad) but not through any prior history.
+        '''
         x = x.detach()
         # detach() unsets x.requires_grad, so restore it
         x.requires_grad_(x_requires_grad)
@@ -90,11 +116,15 @@ class LigerTiledMLPFunction(torch.autograd.Function):
 
             with torch.enable_grad():
                 output = fn(mlp_module, x_shard)
+            '''
+            torch.autograd.backward(output, incoming_grad_shard) runs backprop for just this shard: it treats incoming_grad_shard as the upstream gradient for output and walks the recomputed graph to produce grads w.r.t. the shard’s inputs. Because x_shard.grad was wired to a slice of x_grad, the resulting input grads land directly in the right spot of the global buffer.
+            '''
             torch.autograd.backward(output, incoming_grad_shard)
 
         # unflatten
         x_grad = x_grad.view(x_shape_orig)
 
+        # None for non differentiable inputs in the forward
         return (None, None, x_grad, None, None)
 
 

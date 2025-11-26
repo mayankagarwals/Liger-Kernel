@@ -119,9 +119,9 @@ class LigerTiledSwiGLUMLP(nn.Module):
             Output tensor of the same shape as input
         """
         compute_params = [
-            self.gate_proj.weight,
-            self.up_proj.weight,
-            self.down_proj.weight,
+            self.gate_proj.weight, # HXI
+            self.up_proj.weight,# HXI
+            self.down_proj.weight, # IXH
         ]
 
         return apply_tiled_mlp(
