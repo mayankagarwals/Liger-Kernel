@@ -77,7 +77,7 @@ So tiling removes the need to keep full-sequence intermediate activations; only 
     @ensure_contiguous
     def backward(ctx, *grads) -> tuple:
         fn = ctx.fn
-        (x,) = ctx.saved_tensors
+        (x,) = ctx.saved_tensors 
         mlp_module = ctx.mlp_module
         shards = ctx.shards
 
@@ -111,8 +111,8 @@ After detaching, they restore requires_grad_ to the original value so grads stil
             shard_step = x_shards[i].shape[0]
             shard_offset = i * x_shards[0].shape[0]
 
-            x_shard.grad = x_grad.narrow(0, shard_offset, shard_step).view_as(x_shard)
-            incoming_grad_shard = incoming_grad.narrow(0, shard_offset, shard_step).view_as(x_shard)
+            x_shard.grad = x_grad.narrow(0, shard_offset, shard_step).view_as(x_shard) # just view of x_grad so that when gradient is computed, this slice of x_grad is written 
+            incoming_grad_shard = incoming_grad.narrow(0, shard_offset, shard_step).view_as(x_shard) # same
 
             with torch.enable_grad():
                 output = fn(mlp_module, x_shard)
